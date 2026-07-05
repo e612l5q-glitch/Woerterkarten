@@ -1,38 +1,46 @@
 import { useState, useEffect } from "react";
+import { initializeApp } from "firebase/app";
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
 
-// ── Storage: всё в localStorage, ключи с префиксом ──────────────────────────
-const DB = {
-  get: (k) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
-  remove: (k) => { try { localStorage.removeItem(k); } catch {} },
-  keys: (prefix) => Object.keys(localStorage).filter(k => k.startsWith(prefix)),
+// ── Firebase ──────────────────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyAGqf4FgvRkYs3a7nWtGufV1OszEky8LXc",
+  authDomain: "woerterkarten.firebaseapp.com",
+  projectId: "woerterkarten",
+  storageBucket: "woerterkarten.firebasestorage.app",
+  messagingSenderId: "734444392049",
+  appId: "1:734444392049:web:60f190035db2ce2fb095d0"
 };
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
-// ── Аккаунты: {username: {passwordHash, isTeacher}} ──────────────────────────
+// ── DB helpers ────────────────────────────────────────────────────────────────
+async function dbGet(path) {
+  try {
+    const ref = doc(db, ...path.split("/"));
+    const snap = await getDoc(ref);
+    return snap.exists() ? snap.data() : null;
+  } catch { return null; }
+}
+async function dbSet(path, data) {
+  try { await setDoc(doc(db, ...path.split("/")), data, { merge: true }); } catch(e) { console.error(e); }
+}
+async function dbGetAll(col) {
+  try {
+    const snap = await getDocs(collection(db, col));
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch { return []; }
+}
+
+// ── Auth helpers ──────────────────────────────────────────────────────────────
 function hashPass(p) {
-  // простой хэш для хранения (не криптографический — достаточно для учебного приложения)
   let h = 0;
   for (let i = 0; i < p.length; i++) { h = ((h << 5) - h) + p.charCodeAt(i); h |= 0; }
   return h.toString(36);
 }
+const TEACHER_CODE = "lehrer2024";
 
-const TEACHER_CODE = "lehrer2024"; // код при регистрации учителя
-
-function getAccounts() { return DB.get("accounts") || {}; }
-function saveAccounts(a) { DB.set("accounts", a); }
-
-function getUserData(username) {
-  return DB.get(`user_${username}`) || { words: [], folders: [], progress: {} };
-}
-function saveUserData(username, data) { DB.set(`user_${username}`, data); }
-
-// Глобальные слова учителя
-function getGlobalWords() { return DB.get("global_words") || []; }
-function saveGlobalWords(w) { DB.set("global_words", w); }
-function getGlobalFolders() { return DB.get("global_folders") || []; }
-function saveGlobalFolders(f) { DB.set("global_folders", f); }
-
-// ── SRS ──────────────────────────────────────────────────────────────────────
+// ── SRS ───────────────────────────────────────────────────────────────────────
 const INTERVALS = [0, 1, 3, 7, 14, 30];
 function nextReview(level, knew) {
   const newLevel = knew ? Math.min(level + 1, INTERVALS.length - 1) : 0;
@@ -55,8 +63,6 @@ const css = `
   body { background: var(--ivory); color: var(--ink); font-family: 'Inter', system-ui, sans-serif; min-height: 100vh; }
   h1,h2,h3 { font-family: 'Lora', Georgia, serif; }
   .app { max-width: 700px; margin: 0 auto; padding: 24px 16px 60px; }
-
-  /* Header */
   .header { display:flex; align-items:center; justify-content:space-between; padding-bottom:18px; border-bottom:1.5px solid var(--ivory-dark); margin-bottom:24px; }
   .brand h1 { font-size:21px; letter-spacing:-0.5px; }
   .brand span { font-size:12px; color:var(--sage); font-style:italic; font-family:'Lora',serif; }
@@ -64,8 +70,6 @@ const css = `
   .user-pill:hover { background:#d4e4da; }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--sage); }
   .teacher-badge { background:var(--accent-pale); color:var(--accent); font-size:11px; padding:2px 8px; border-radius:99px; font-weight:600; }
-
-  /* Auth */
   .auth-wrap { display:flex; flex-direction:column; align-items:center; padding:40px 0 24px; }
   .auth-wrap h2 { font-size:26px; margin-bottom:6px; }
   .auth-wrap p { color:var(--ink-soft); font-size:14px; margin-bottom:28px; }
@@ -79,31 +83,21 @@ const css = `
   .auth-switch { margin-top:16px; font-size:13px; color:var(--sage); cursor:pointer; background:none; border:none; text-decoration:underline; font-family:inherit; display:block; width:100%; text-align:center; }
   .err { color:var(--red-soft); font-size:13px; margin-top:4px; }
   .ok { color:var(--sage); font-size:13px; margin-top:4px; }
-
-  /* Nav */
   .nav { display:flex; gap:4px; background:var(--ivory-dark); border-radius:10px; padding:4px; margin-bottom:22px; }
   .nav-tab { flex:1; padding:8px 6px; border:none; border-radius:7px; font-size:13px; font-weight:500; cursor:pointer; background:transparent; color:var(--ink-soft); font-family:inherit; transition:all .15s; }
   .nav-tab.active { background:white; color:var(--ink); box-shadow:0 1px 4px rgba(0,0,0,.10); }
-
-  /* Stats */
   .stats-bar { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:20px; }
   .stat { background:white; border-radius:10px; padding:13px 10px; text-align:center; box-shadow:0 1px 4px rgba(0,0,0,.06); }
   .stat-n { font-family:'Lora',serif; font-size:24px; font-weight:600; line-height:1; }
   .stat-l { font-size:10px; color:var(--ink-soft); margin-top:3px; text-transform:uppercase; letter-spacing:.5px; }
   .stat-n.due { color:var(--accent); } .stat-n.ok { color:var(--sage); }
-
-  /* Direction toggle */
   .dir-toggle { display:flex; align-items:center; gap:0; background:var(--ivory-dark); border-radius:99px; padding:3px; margin: 0 auto 16px; width:fit-content; }
   .dir-btn { padding:6px 16px; border:none; border-radius:99px; font-size:13px; font-weight:500; cursor:pointer; background:transparent; color:var(--ink-soft); font-family:inherit; transition:all .15s; }
   .dir-btn.active { background:white; color:var(--ink); box-shadow:0 1px 4px rgba(0,0,0,.10); font-weight:600; }
-
-  /* Progress bar */
   .prog-wrap { margin-bottom:14px; }
   .prog-bar { height:4px; background:var(--ivory-dark); border-radius:99px; overflow:hidden; margin-bottom:6px; }
   .prog-fill { height:100%; background:var(--sage); border-radius:99px; transition:width .3s; }
   .prog-text { font-size:11px; color:var(--ink-soft); text-align:right; }
-
-  /* Flashcard */
   .fc-wrap { margin:0 auto 18px; }
   .fc { background:white; border-radius:var(--radius); box-shadow:var(--shadow); padding:36px 28px; min-height:210px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; cursor:pointer; transition:transform .15s, box-shadow .15s; position:relative; user-select:none; }
   .fc:hover { transform:translateY(-2px); box-shadow:0 8px 32px rgba(26,26,46,.13); }
@@ -115,20 +109,14 @@ const css = `
   .fc-tap { font-size:11px; color:#ccc; margin-top:18px; }
   .fc-lvl { position:absolute; top:13px; right:13px; font-size:11px; color:var(--sage-light); }
   .fc-folder { position:absolute; top:13px; left:13px; font-size:11px; color:var(--accent); background:var(--accent-pale); padding:2px 8px; border-radius:99px; }
-
-  /* Answer btns */
   .ans-btns { display:flex; gap:10px; margin-top:2px; }
   .btn-knew { flex:1; padding:13px; background:var(--sage-pale); color:var(--sage); border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; transition:background .15s; }
   .btn-knew:hover { background:#c4dccb; }
   .btn-forgot { flex:1; padding:13px; background:var(--red-pale); color:var(--red-soft); border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; transition:background .15s; }
   .btn-forgot:hover { background:#fad5d2; }
-
-  /* Empty */
   .empty { text-align:center; padding:40px 16px; color:var(--ink-soft); }
   .empty .emoji { font-size:44px; margin-bottom:14px; }
   .empty h3 { font-size:18px; margin-bottom:6px; color:var(--ink); }
-
-  /* Word list */
   .word-list { display:flex; flex-direction:column; gap:8px; }
   .word-item { background:white; border-radius:10px; padding:13px 14px; display:flex; align-items:center; gap:10px; box-shadow:0 1px 4px rgba(0,0,0,.06); }
   .wi-text { flex:1; }
@@ -141,8 +129,6 @@ const css = `
   .badge-p { background:var(--accent-pale); color:var(--accent); }
   .btn-del { background:none; border:none; cursor:pointer; color:#ccc; font-size:15px; padding:3px 5px; border-radius:6px; transition:color .15s, background .15s; }
   .btn-del:hover { color:var(--red-soft); background:var(--red-pale); }
-
-  /* Add form */
   .add-form { background:white; border-radius:var(--radius); padding:22px; box-shadow:var(--shadow); margin-bottom:18px; }
   .add-form h3 { font-size:16px; margin-bottom:14px; }
   .form-row { display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
@@ -153,8 +139,6 @@ const css = `
   .btn-add:hover { background:var(--ink); }
   .btn-add:disabled { opacity:.4; cursor:not-allowed; }
   .sec-label { font-size:11px; font-weight:600; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.5px; margin-bottom:9px; margin-top:2px; }
-
-  /* Folders */
   .folder-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px,1fr)); gap:10px; margin-bottom:20px; }
   .folder-card { background:white; border-radius:12px; padding:16px 14px; box-shadow:0 1px 4px rgba(0,0,0,.06); cursor:pointer; border:2px solid transparent; transition:all .15s; }
   .folder-card:hover { border-color:var(--sage-light); transform:translateY(-1px); }
@@ -168,31 +152,38 @@ const css = `
   .btn-sm:hover { border-color:var(--sage); color:var(--sage); }
   .btn-sm.danger:hover { border-color:var(--red-soft); color:var(--red-soft); }
   select { appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238aaa96' stroke-width='1.5' fill='none'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 10px center; padding-right:28px !important; }
-
-  /* Filter bar */
   .filter-bar { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; align-items:center; }
   .filter-bar select { flex:1; min-width:120px; max-width:200px; }
   .filter-bar input { flex:2; min-width:120px; }
+  .loading { text-align:center; padding:60px 16px; color:var(--ink-soft); font-size:15px; }
+  .spinner { display:inline-block; width:32px; height:32px; border:3px solid var(--ivory-dark); border-top-color:var(--sage); border-radius:50%; animation:spin 0.8s linear infinite; margin-bottom:16px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 `;
 
 // ── App root ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [session, setSession] = useState(null); // {username, isTeacher}
+  const [session, setSession] = useState(null);
   const [tab, setTab] = useState("learn");
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const s = DB.get("session");
-    if (s) setSession(s);
+    const s = localStorage.getItem("dw_session");
+    if (s) setSession(JSON.parse(s));
+    setLoading(false);
   }, []);
 
   function login(username, isTeacher) {
     const s = { username, isTeacher };
-    DB.set("session", s);
+    localStorage.setItem("dw_session", JSON.stringify(s));
     setSession(s);
     setTab("learn");
   }
-  function logout() { DB.remove("session"); setSession(null); }
+  function logout() {
+    localStorage.removeItem("dw_session");
+    setSession(null);
+  }
 
+  if (loading) return <><style>{css}</style><div className="app"><div className="loading"><div className="spinner"/><br/>Lädt…</div></div></>;
   if (!session) return <><style>{css}</style><div className="app"><AuthScreen onLogin={login} /></div></>;
 
   return (
@@ -224,32 +215,33 @@ export default function App() {
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function AuthScreen({ onLogin }) {
-  const [mode, setMode] = useState("login"); // login | register
+  const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [teacherCode, setTeacherCode] = useState("");
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  function handleSubmit() {
-    setErr("");
+  async function handleSubmit() {
+    setErr(""); setBusy(true);
     const u = username.trim();
-    if (!u || !password) { setErr("Fehlende Angaben."); return; }
-    const accounts = getAccounts();
+    if (!u || !password) { setErr("Fehlende Angaben."); setBusy(false); return; }
 
     if (mode === "login") {
-      const acc = accounts[u];
-      if (!acc) { setErr("Benutzer nicht gefunden."); return; }
-      if (acc.passwordHash !== hashPass(password)) { setErr("Falsches Passwort."); return; }
+      const acc = await dbGet(`accounts/${u}`);
+      if (!acc) { setErr("Benutzer nicht gefunden."); setBusy(false); return; }
+      if (acc.passwordHash !== hashPass(password)) { setErr("Falsches Passwort."); setBusy(false); return; }
       onLogin(u, acc.isTeacher);
     } else {
-      if (accounts[u]) { setErr("Benutzername vergeben."); return; }
-      if (password.length < 4) { setErr("Passwort mindestens 4 Zeichen."); return; }
+      const existing = await dbGet(`accounts/${u}`);
+      if (existing) { setErr("Benutzername vergeben."); setBusy(false); return; }
+      if (password.length < 4) { setErr("Passwort mindestens 4 Zeichen."); setBusy(false); return; }
       const isTeacher = teacherCode === TEACHER_CODE;
-      if (teacherCode && !isTeacher) { setErr("Falscher Lehrerinnen-Code."); return; }
-      accounts[u] = { passwordHash: hashPass(password), isTeacher };
-      saveAccounts(accounts);
+      if (teacherCode && !isTeacher) { setErr("Falscher Lehrerinnen-Code."); setBusy(false); return; }
+      await dbSet(`accounts/${u}`, { passwordHash: hashPass(password), isTeacher });
       onLogin(u, isTeacher);
     }
+    setBusy(false);
   }
 
   return (
@@ -266,8 +258,8 @@ function AuthScreen({ onLogin }) {
           <input placeholder="Nur für die Lehrerin" value={teacherCode} onChange={e=>setTeacherCode(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleSubmit()} />
         </>}
         {err && <p className="err">{err}</p>}
-        <button className="btn-main" style={{marginTop:6}} onClick={handleSubmit} disabled={!username.trim()||!password}>
-          {mode==="login" ? "Einloggen" : "Registrieren"}
+        <button className="btn-main" style={{marginTop:6}} onClick={handleSubmit} disabled={!username.trim()||!password||busy}>
+          {busy ? "Lädt…" : mode==="login" ? "Einloggen" : "Registrieren"}
         </button>
         <button className="auth-switch" onClick={()=>{setMode(m=>m==="login"?"register":"login");setErr("");}}>
           {mode==="login" ? "Noch kein Konto? Registrieren →" : "← Zurück zum Login"}
@@ -277,18 +269,17 @@ function AuthScreen({ onLogin }) {
   );
 }
 
-// ── Helpers: merge global + personal words ────────────────────────────────────
-function getAllWords(username) {
-  const gw = getGlobalWords();
-  const ud = getUserData(username);
-  return [...gw, ...ud.words];
+// ── Data helpers ──────────────────────────────────────────────────────────────
+async function loadGlobalWords() { return await dbGetAll("global_words"); }
+async function loadGlobalFolders() { return await dbGetAll("global_folders"); }
+async function loadUserWords(username) { return await dbGetAll(`users/${username}/words`); }
+async function loadUserFolders(username) { return await dbGetAll(`users/${username}/folders`); }
+async function loadProgress(username) {
+  const d = await dbGet(`users/${username}/meta/progress`);
+  return d?.data || {};
 }
-function getGlobalFolderList() { return getGlobalFolders(); }
-function getUserFolderList(username) { return getUserData(username).folders || []; }
-function getAllFolders(username) {
-  const gf = getGlobalFolderList().map(f=>({...f, source:"global"}));
-  const uf = getUserFolderList(username).map(f=>({...f, source:"personal"}));
-  return [...gf, ...uf];
+async function saveProgress(username, progress) {
+  await dbSet(`users/${username}/meta/progress`, { data: progress });
 }
 
 // ── Learn tab ─────────────────────────────────────────────────────────────────
@@ -297,40 +288,51 @@ function LearnTab({ session }) {
   const [idx, setIdx] = useState(0);
   const [direction, setDirection] = useState(() => localStorage.getItem("dw_dir") || "de2ru");
   const [filterFolder, setFilterFolder] = useState("all");
-  const [ud, setUd] = useState(() => getUserData(session.username));
+  const [allWords, setAllWords] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [progress, setProgress] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      const [gw, uw, gf, uf, prog] = await Promise.all([
+        loadGlobalWords(), loadUserWords(session.username),
+        loadGlobalFolders(), loadUserFolders(session.username),
+        loadProgress(session.username)
+      ]);
+      setAllWords([...gw, ...uw]);
+      setFolders([...gf.map(f=>({...f,source:"global"})), ...uf.map(f=>({...f,source:"personal"}))]);
+      setProgress(prog);
+      setLoading(false);
+    })();
+  }, []);
 
   const setDir = (d) => { setDirection(d); localStorage.setItem("dw_dir", d); setRevealed(false); setIdx(0); };
-
-  const allWords = getAllWords(session.username);
-  const folders = getAllFolders(session.username);
-
-  const filteredWords = filterFolder === "all" ? allWords
-    : allWords.filter(w => w.folderId === filterFolder);
-
-  const dueCards = filteredWords.filter(w => isDue(ud.progress[w.id]));
+  const filteredWords = filterFolder==="all" ? allWords : allWords.filter(w=>w.folderId===filterFolder);
+  const dueCards = filteredWords.filter(w=>isDue(progress[w.id]));
   const total = filteredWords.length;
-  const learned = filteredWords.filter(w => (ud.progress[w.id]?.level||0) >= 3).length;
+  const learned = filteredWords.filter(w=>(progress[w.id]?.level||0)>=3).length;
   const card = dueCards[idx % Math.max(dueCards.length,1)] || null;
 
   async function answer(knew) {
     if (!card) return;
-    const p = ud.progress[card.id] || { level: 0 };
-    const newProg = { ...ud.progress, [card.id]: nextReview(p.level, knew) };
-    const newUd = { ...ud, progress: newProg };
-    setUd(newUd);
-    saveUserData(session.username, newUd);
+    const p = progress[card.id] || { level: 0 };
+    const newProg = { ...progress, [card.id]: nextReview(p.level, knew) };
+    setProgress(newProg);
+    await saveProgress(session.username, newProg);
     setRevealed(false);
-    setIdx(i => i >= dueCards.length - 1 ? 0 : i + 1);
+    setIdx(i => i >= dueCards.length-1 ? 0 : i+1);
   }
 
   const front = card ? (direction==="de2ru"
-    ? { hint:"Deutsch → ?", article: card.article, word: card.de, isDE: true }
-    : { hint:"Muttersprache → ?", word: card.ru, isDE: false }) : null;
+    ? { hint:"Deutsch → ?", article:card.article, word:card.de, isDE:true }
+    : { hint:"Muttersprache → ?", word:card.ru, isDE:false }) : null;
   const back = card ? (direction==="de2ru"
-    ? { word: card.ru, isDE: false }
-    : { article: card.article, word: card.de, isDE: true }) : null;
-
+    ? { word:card.ru, isDE:false }
+    : { article:card.article, word:card.de, isDE:true }) : null;
   const cardFolder = card ? folders.find(f=>f.id===card.folderId) : null;
+
+  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
 
   return (<>
     <div className="stats-bar">
@@ -339,24 +341,20 @@ function LearnTab({ session }) {
       <div className="stat"><div className="stat-n ok">{learned}</div><div className="stat-l">Gelernt</div></div>
     </div>
     {total>0 && <div className="prog-wrap">
-      <div className="prog-bar"><div className="prog-fill" style={{width:`${Math.round(learned/total*100)}%`}} /></div>
+      <div className="prog-bar"><div className="prog-fill" style={{width:`${Math.round(learned/total*100)}%`}}/></div>
       <div className="prog-text">{Math.round(learned/total*100)}% gemeistert</div>
     </div>}
-
-    {/* Filter by folder */}
     {folders.length>0 && <div className="filter-bar">
       <select value={filterFolder} onChange={e=>{setFilterFolder(e.target.value);setIdx(0);setRevealed(false);}}>
         <option value="all">📂 Alle Ordner</option>
         {folders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
       </select>
     </div>}
-
     {total>0 && <div className="dir-toggle">
       <button className={`dir-btn${direction==="de2ru"?" active":""}`} onClick={()=>setDir("de2ru")}>Deutsch</button>
       <span style={{color:"var(--sage-light)",padding:"0 2px"}}>⇄</span>
       <button className={`dir-btn${direction==="ru2de"?" active":""}`} onClick={()=>setDir("ru2de")}>Muttersprache</button>
     </div>}
-
     {!card ? (
       <div className="empty">
         <div className="emoji">{total===0?"📭":"🎉"}</div>
@@ -367,7 +365,7 @@ function LearnTab({ session }) {
       <div className="fc-wrap">
         <div className="fc" onClick={()=>!revealed&&setRevealed(true)}>
           {cardFolder && <div className="fc-folder">{cardFolder.icon} {cardFolder.name}</div>}
-          <div className="fc-lvl">{lvlEmoji(ud.progress[card.id]?.level)}</div>
+          <div className="fc-lvl">{lvlEmoji(progress[card.id]?.level)}</div>
           <div className="fc-hint">{front.hint}</div>
           {front.isDE && front.article && <div className="fc-article">{front.article}</div>}
           <div className="fc-word" style={front.isDE?{}:{fontFamily:"'Inter',sans-serif",fontSize:28}}>{front.word}</div>
@@ -393,30 +391,45 @@ function WordsTab({ session }) {
   const [folderId, setFolderId] = useState("");
   const [search, setSearch] = useState("");
   const [filterFolder, setFilterFolder] = useState("all");
-  const [ud, setUd] = useState(() => getUserData(session.username));
+  const [allWords, setAllWords] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [loading, setLoading] = useState(true);
 
-  const folders = getAllFolders(session.username);
-  const allWords = getAllWords(session.username);
+  useEffect(() => {
+    (async () => {
+      const [gw, uw, gf, uf] = await Promise.all([
+        loadGlobalWords(), loadUserWords(session.username),
+        loadGlobalFolders(), loadUserFolders(session.username)
+      ]);
+      setAllWords([...gw, ...uw]);
+      setFolders([...gf.map(f=>({...f,source:"global"})), ...uf.map(f=>({...f,source:"personal"}))]);
+      setLoading(false);
+    })();
+  }, []);
 
-  function saveUD(newUd) { setUd(newUd); saveUserData(session.username, newUd); }
-
-  function addWord() {
+  async function addWord() {
     if (!de.trim()||!ru.trim()) return;
-    const w = { id:`p_${Date.now()}_${Math.random().toString(36).slice(2)}`, de:de.trim(), article:article.trim(), ru:ru.trim(), example:example.trim(), folderId:folderId||null, addedBy:session.username, source:"personal" };
-    saveUD({ ...ud, words: [...ud.words, w] });
+    const id = `p_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const w = { de:de.trim(), article:article.trim(), ru:ru.trim(), example:example.trim(), folderId:folderId||null, addedBy:session.username, source:"personal" };
+    await dbSet(`users/${session.username}/words/${id}`, w);
+    setAllWords(prev=>[...prev, {...w, id}]);
     setDe(""); setArticle(""); setRu(""); setExample(""); setFolderId("");
   }
 
-  function deleteWord(id) {
-    // can only delete own personal words
-    saveUD({ ...ud, words: ud.words.filter(w=>w.id!==id) });
+  async function deleteWord(word) {
+    await deleteDoc(doc(db, `users/${session.username}/words/${word.id}`));
+    setAllWords(prev=>prev.filter(w=>w.id!==word.id));
   }
 
-  const visible = allWords.filter(w => {
-    const matchFolder = filterFolder==="all" || w.folderId===filterFolder;
-    const matchSearch = !search || w.de.toLowerCase().includes(search.toLowerCase()) || w.ru.toLowerCase().includes(search.toLowerCase());
-    return matchFolder && matchSearch;
+  const visible = allWords.filter(w=>{
+    const mf = filterFolder==="all" || w.folderId===filterFolder;
+    const ms = !search || w.de.toLowerCase().includes(search.toLowerCase()) || w.ru.toLowerCase().includes(search.toLowerCase());
+    return mf && ms;
   });
+
+  const myFolders = folders.filter(f=>f.source==="personal");
+
+  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
 
   return (<>
     <div className="add-form">
@@ -430,14 +443,11 @@ function WordsTab({ session }) {
         <input placeholder="Beispielsatz (optional)" value={example} onChange={e=>setExample(e.target.value)} />
         <select value={folderId} onChange={e=>setFolderId(e.target.value)} style={{flex:"none",width:160}}>
           <option value="">📂 Kein Ordner</option>
-          {folders.filter(f=>f.source==="personal").map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
+          {myFolders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
         </select>
         <button className="btn-add" onClick={addWord} disabled={!de.trim()||!ru.trim()}>+</button>
       </div>
     </div>
-
-    <ImportBlock username={session.username} onImport={()=>window.location.reload()} />
-
     <div className="filter-bar">
       <input placeholder="🔍 Suchen…" value={search} onChange={e=>setSearch(e.target.value)} />
       <select value={filterFolder} onChange={e=>setFilterFolder(e.target.value)}>
@@ -445,7 +455,6 @@ function WordsTab({ session }) {
         {folders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
       </select>
     </div>
-
     <div className="sec-label">Wörter ({visible.length})</div>
     <div className="word-list">
       {visible.length===0 && <div className="empty" style={{padding:24}}><p>Keine Wörter gefunden.</p></div>}
@@ -460,8 +469,7 @@ function WordsTab({ session }) {
             </div>
             {folder && <span className="wi-folder">{folder.icon} {folder.name}</span>}
             <span className={`wi-badge ${w.source==="global"?"badge-g":"badge-p"}`}>{w.source==="global"?"Kurs":"Ich"}</span>
-            <span style={{fontSize:13}}>{lvlEmoji(getUserData(session.username).progress[w.id]?.level)}</span>
-            {isOwn && <button className="btn-del" onClick={()=>deleteWord(w.id)}>✕</button>}
+            {isOwn && <button className="btn-del" onClick={()=>deleteWord(w)}>✕</button>}
           </div>
         );
       })}
@@ -474,34 +482,40 @@ function FoldersTab({ session }) {
   const [name, setName] = useState("");
   const [icon, setIcon] = useState("📁");
   const [selected, setSelected] = useState(null);
-  const [ud, setUd] = useState(() => getUserData(session.username));
+  const [allWords, setAllWords] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const icons = ["📁","⭐","🔤","🏠","🍎","🚗","🌍","💼","📚","🎭","🌿","🔢"];
 
-  function saveUD(newUd) { setUd(newUd); saveUserData(session.username, newUd); }
+  useEffect(() => {
+    (async () => {
+      const [gw, uw, gf, uf] = await Promise.all([
+        loadGlobalWords(), loadUserWords(session.username),
+        loadGlobalFolders(), loadUserFolders(session.username)
+      ]);
+      setAllWords([...gw, ...uw]);
+      setFolders([...gf.map(f=>({...f,source:"global"})), ...uf.map(f=>({...f,source:"personal"}))]);
+      setLoading(false);
+    })();
+  }, []);
 
-  const personalFolders = ud.folders || [];
-  const globalFolders = getGlobalFolderList();
-  const allFolders = [
-    ...globalFolders.map(f=>({...f,source:"global"})),
-    ...personalFolders.map(f=>({...f,source:"personal"}))
-  ];
-  const allWords = getAllWords(session.username);
-
-  function addFolder() {
+  async function addFolder() {
     if (!name.trim()) return;
-    const f = { id:`pf_${Date.now()}`, name:name.trim(), icon };
-    saveUD({ ...ud, folders:[...personalFolders, f] });
+    const id = `pf_${Date.now()}`;
+    const f = { name:name.trim(), icon, source:"personal" };
+    await dbSet(`users/${session.username}/folders/${id}`, f);
+    setFolders(prev=>[...prev, {...f, id}]);
     setName(""); setIcon("📁");
   }
-  function deleteFolder(id) {
-    // remove folder and unassign words
-    const newWords = ud.words.map(w=>w.folderId===id?{...w,folderId:null}:w);
-    saveUD({ ...ud, folders:personalFolders.filter(f=>f.id!==id), words:newWords });
-    if (selected===id) setSelected(null);
+
+  async function deleteFolder(fid) {
+    await deleteDoc(doc(db, `users/${session.username}/folders/${fid}`));
+    setFolders(prev=>prev.filter(f=>f.id!==fid));
+    if (selected===fid) setSelected(null);
   }
 
   const wordsInFolder = (fid) => allWords.filter(w=>w.folderId===fid);
-
-  const icons = ["📁","⭐","🔤","🏠","🍎","🚗","🌍","💼","📚","🎭","🌿","🔢"];
+  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
 
   return (<>
     <div className="add-form">
@@ -514,7 +528,6 @@ function FoldersTab({ session }) {
         <button className="btn-add" onClick={addFolder} disabled={!name.trim()}>Erstellen</button>
       </div>
     </div>
-
     <div className="sec-label">Ordner</div>
     <div className="folder-grid">
       <div className={`folder-card all${selected===null?" active":""}`} onClick={()=>setSelected(null)}>
@@ -522,7 +535,7 @@ function FoldersTab({ session }) {
         <div className="folder-name">Alle Wörter</div>
         <div className="folder-count">{allWords.length} Wörter</div>
       </div>
-      {allFolders.map(f=>(
+      {folders.map(f=>(
         <div key={f.id} className={`folder-card${selected===f.id?" active":""}`} onClick={()=>setSelected(s=>s===f.id?null:f.id)}>
           <div className="folder-icon">{f.icon}</div>
           <div className="folder-name">{f.name}</div>
@@ -530,9 +543,8 @@ function FoldersTab({ session }) {
         </div>
       ))}
     </div>
-
     {selected && (() => {
-      const folder = allFolders.find(f=>f.id===selected);
+      const folder = folders.find(f=>f.id===selected);
       const words = wordsInFolder(selected);
       const isOwn = folder?.source==="personal";
       return (<>
@@ -557,60 +569,6 @@ function FoldersTab({ session }) {
   </>);
 }
 
-
-// ── Import block (for students) ───────────────────────────────────────────────
-function ImportBlock({ username, onImport }) {
-  const [code, setCode] = useState("");
-  const [msg, setMsg] = useState("");
-  const [open, setOpen] = useState(false);
-
-  function doImport() {
-    try {
-      const str = decodeURIComponent(escape(atob(code.trim())));
-      const data = JSON.parse(str);
-      if (!data.words || !Array.isArray(data.words)) throw new Error("bad");
-      // Save as global words (overwrite with merge)
-      const existing = getGlobalWords();
-      const existingIds = new Set(existing.map(w=>w.id));
-      const newWords = data.words.filter(w=>!existingIds.has(w.id));
-      saveGlobalWords([...existing, ...newWords]);
-      // Folders
-      if (data.folders) {
-        const ef = getGlobalFolderList();
-        const efIds = new Set(ef.map(f=>f.id));
-        const newF = data.folders.filter(f=>!efIds.has(f.id));
-        saveGlobalFolders([...ef, ...newF]);
-      }
-      setMsg(`✓ ${newWords.length} neue Wörter importiert!`);
-      setCode("");
-      setTimeout(()=>{ setMsg(""); setOpen(false); onImport(); }, 1500);
-    } catch {
-      setMsg("⚠ Ungültiger Code.");
-    }
-  }
-
-  if (!open) return (
-    <div style={{marginBottom:14}}>
-      <button className="btn-sm" onClick={()=>setOpen(true)} style={{width:"100%",padding:"10px",textAlign:"center",borderStyle:"dashed"}}>
-        📥 Code von Lehrerin importieren
-      </button>
-    </div>
-  );
-
-  return (
-    <div className="add-form" style={{marginBottom:14,background:"var(--accent-pale)",border:"1.5px solid #e8c4a0"}}>
-      <h3>📥 Code importieren</h3>
-      <p style={{fontSize:13,color:"var(--ink-soft)",marginBottom:10}}>Füge den Code ein, den du von deiner Lehrerin bekommen hast.</p>
-      <div className="form-row">
-        <input placeholder="Code hier einfügen…" value={code} onChange={e=>setCode(e.target.value)} />
-        <button className="btn-add" onClick={doImport} disabled={!code.trim()} style={{background:"var(--accent)"}}>Importieren</button>
-        <button className="btn-sm" onClick={()=>setOpen(false)}>✕</button>
-      </div>
-      {msg && <p className={msg.startsWith("✓")?"ok":"err"}>{msg}</p>}
-    </div>
-  );
-}
-
 // ── Manage tab (teacher) ──────────────────────────────────────────────────────
 function ManageTab() {
   const [de, setDe] = useState(""); const [article, setArticle] = useState("");
@@ -620,22 +578,31 @@ function ManageTab() {
   const [msg, setMsg] = useState("");
   const [folderName, setFolderName] = useState("");
   const [folderIcon, setFolderIcon] = useState("📁");
-  const [words, setWords] = useState(getGlobalWords);
-  const [folders, setFolders] = useState(getGlobalFolderList);
+  const [words, setWords] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [loading, setLoading] = useState(true);
   const icons = ["📁","⭐","🔤","🏠","🍎","🚗","🌍","💼","📚","🎭","🌿","🔢"];
 
-  function saveW(w) { setWords(w); saveGlobalWords(w); }
-  function saveF(f) { setFolders(f); saveGlobalFolders(f); }
+  useEffect(() => {
+    (async () => {
+      const [gw, gf] = await Promise.all([loadGlobalWords(), loadGlobalFolders()]);
+      setWords(gw); setFolders(gf); setLoading(false);
+    })();
+  }, []);
 
-  function addWord() {
+  function flash(m) { setMsg(m); setTimeout(()=>setMsg(""),2500); }
+
+  async function addWord() {
     if (!de.trim()||!ru.trim()) return;
-    const w = { id:`g_${Date.now()}_${Math.random().toString(36).slice(2)}`, de:de.trim(), article:article.trim(), ru:ru.trim(), example:example.trim(), folderId:folderId||null, addedBy:"Lehrerin", source:"global" };
-    saveW([...words, w]);
+    const id = `g_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const w = { de:de.trim(), article:article.trim(), ru:ru.trim(), example:example.trim(), folderId:folderId||null, addedBy:"Lehrerin", source:"global" };
+    await dbSet(`global_words/${id}`, w);
+    setWords(prev=>[...prev, {...w, id}]);
     setDe(""); setArticle(""); setRu(""); setExample("");
     flash("✓ Wort hinzugefügt");
   }
 
-  function bulkAdd() {
+  async function bulkAdd() {
     const lines = bulk.split("\n").map(l=>l.trim()).filter(Boolean);
     const newW = [];
     for (const line of lines) {
@@ -644,45 +611,40 @@ function ManageTab() {
       let de_=parts[0], art_="", ru_=parts[1], ex_=parts[2]||"";
       const m = de_.match(/^(der|die|das|ein|eine)\s+(.+)$/i);
       if (m) { art_=m[1]; de_=m[2]; }
-      newW.push({ id:`g_${Date.now()}_${Math.random().toString(36).slice(2)}_${newW.length}`, de:de_, article:art_, ru:ru_, example:ex_, folderId:folderId||null, addedBy:"Lehrerin", source:"global" });
+      newW.push({ de:de_, article:art_, ru:ru_, example:ex_, folderId:folderId||null, addedBy:"Lehrerin", source:"global" });
     }
     if (!newW.length) { flash("⚠ Format: Wort – Übersetzung"); return; }
-    saveW([...words, ...newW]);
+    for (const w of newW) {
+      const id = `g_${Date.now()}_${Math.random().toString(36).slice(2)}_${newW.indexOf(w)}`;
+      await dbSet(`global_words/${id}`, w);
+      setWords(prev=>[...prev, {...w, id}]);
+    }
     setBulk(""); flash(`✓ ${newW.length} Wörter hinzugefügt`);
   }
 
-  function addFolder() {
+  async function addFolder() {
     if (!folderName.trim()) return;
-    const f = { id:`gf_${Date.now()}`, name:folderName.trim(), icon:folderIcon };
-    saveF([...folders, f]);
+    const id = `gf_${Date.now()}`;
+    const f = { name:folderName.trim(), icon:folderIcon, source:"global" };
+    await dbSet(`global_folders/${id}`, f);
+    setFolders(prev=>[...prev, {...f, id}]);
     setFolderName(""); setFolderIcon("📁");
     flash("✓ Ordner erstellt");
   }
 
-  function flash(m) { setMsg(m); setTimeout(()=>setMsg(""),2500); }
-
-  function doExport() {
-    const data = { words, folders, exported: new Date().toLocaleDateString("de-DE") };
-    const str = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
-    navigator.clipboard.writeText(str)
-      .then(()=>flash("✓ Code kopiert! Jetzt an Schüler senden."))
-      .catch(()=>{ window.prompt("Kopiere diesen Code:", str); });
+  async function deleteWord(id) {
+    await deleteDoc(doc(db, `global_words/${id}`));
+    setWords(prev=>prev.filter(w=>w.id!==id));
   }
 
-  return (<>
-    {/* Export */}
-    <div className="add-form" style={{background:"var(--sage-pale)",border:"1.5px solid var(--sage-light)"}}>
-      <h3>📤 Wörter exportieren</h3>
-      <p style={{fontSize:13,color:"var(--ink-soft)",marginBottom:12,lineHeight:1.5}}>
-        Exportiere alle Kurswörter als Code — schicke ihn an Schüler per WhatsApp oder Telegram. Sie fügen ihn einmal ein und haben sofort alle Wörter.
-      </p>
-      <button className="btn-add" onClick={doExport} disabled={words.length===0} style={{background:"var(--sage)"}}>
-        📋 Code kopieren ({words.length} Wörter, {folders.length} Ordner)
-      </button>
-      {msg && <p className="ok" style={{marginTop:8}}>{msg}</p>}
-    </div>
+  async function deleteFolder(id) {
+    await deleteDoc(doc(db, `global_folders/${id}`));
+    setFolders(prev=>prev.filter(f=>f.id!==id));
+  }
 
-    {/* Folder creation */}
+  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
+
+  return (<>
     <div className="add-form">
       <h3>📁 Kurs-Ordner erstellen</h3>
       <div className="form-row">
@@ -695,12 +657,11 @@ function ManageTab() {
       {folders.length>0 && <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}>
         {folders.map(f=><span key={f.id} style={{background:"var(--sage-pale)",color:"var(--sage)",padding:"3px 10px",borderRadius:99,fontSize:12,display:"flex",alignItems:"center",gap:6}}>
           {f.icon} {f.name}
-          <button style={{background:"none",border:"none",cursor:"pointer",color:"#aaa",fontSize:12,padding:0}} onClick={()=>saveF(folders.filter(x=>x.id!==f.id))}>✕</button>
+          <button style={{background:"none",border:"none",cursor:"pointer",color:"#aaa",fontSize:12,padding:0}} onClick={()=>deleteFolder(f.id)}>✕</button>
         </span>)}
       </div>}
     </div>
 
-    {/* Single word */}
     <div className="add-form">
       <h3>Einzelnes Wort hinzufügen</h3>
       <div className="form-row">
@@ -719,7 +680,6 @@ function ManageTab() {
       {msg && <p className="ok">{msg}</p>}
     </div>
 
-    {/* Bulk */}
     <div className="add-form">
       <h3>Mehrere Wörter auf einmal</h3>
       <p style={{fontSize:12,color:"var(--ink-soft)",marginBottom:10}}>Format: <code>der Hund – собака</code> oder <code>arbeiten – работать – Ich arbeite gern.</code></p>
@@ -735,10 +695,8 @@ function ManageTab() {
       <button className="btn-add" onClick={bulkAdd} disabled={!bulk.trim()}>Alle hinzufügen</button>
     </div>
 
-    {/* Word list */}
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
       <div className="sec-label" style={{margin:0}}>Kurswörter ({words.length})</div>
-      {words.length>0 && <button className="btn-sm danger" onClick={()=>{if(window.confirm("Alle Kurswörter löschen?"))saveW([])}}>Alle löschen</button>}
     </div>
     <div className="word-list">
       {words.length===0 && <div className="empty" style={{padding:20}}><p>Noch keine Kurswörter.</p></div>}
@@ -751,7 +709,7 @@ function ManageTab() {
               <div className="wi-ru">{w.ru}{w.example&&<span style={{fontStyle:"italic",color:"#aaa"}}> — {w.example}</span>}</div>
             </div>
             {folder && <span className="wi-folder">{folder.icon} {folder.name}</span>}
-            <button className="btn-del" onClick={()=>saveW(words.filter(x=>x.id!==w.id))}>✕</button>
+            <button className="btn-del" onClick={()=>deleteWord(w.id)}>✕</button>
           </div>
         );
       })}
