@@ -377,6 +377,7 @@ function WordsTab({ session }) {
   const [search,setSearch]=useState("");const [filterFolder,setFilterFolder]=useState("all");
   const [allWords,setAllWords]=useState([]);const [folders,setFolders]=useState([]);
   const [loading,setLoading]=useState(true);
+  const [translating,setTranslating]=useState(false);
 
   useEffect(()=>{
     (async()=>{
@@ -386,6 +387,46 @@ function WordsTab({ session }) {
       setLoading(false);
     })();
   },[]);
+
+  async function autoTranslate() {
+    if (!de.trim()) return;
+    setTranslating(true);
+    const langName = LANGUAGES.find(l=>l.code===session.lang)?.label?.split(" ")[0] || "Russisch";
+    try {
+      const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 300,
+          messages: [{
+            role: "user",
+            content: `Du bist ein Wörterbuch-Assistent für Deutschlerner.
+Für das deutsche Wort "${article ? article + " " : ""}${de.trim()}" gib mir:
+1. Eine kurze Übersetzung ins ${langName} (1-3 Wörter)
+2. Einen einfachen deutschen Beispielsatz (A2-B1 Niveau)
+
+Antworte NUR im JSON-Format ohne Markdown:
+{"translation": "...", "example": "..."}`
+          }]
+        })
+      });
+      const data = await res.json();
+      const text = data.content[0].text.trim();
+      const parsed = JSON.parse(text);
+      if (parsed.translation) setRu(parsed.translation);
+      if (parsed.example) setExample(parsed.example);
+    } catch(e) {
+      alert("Fehler beim Übersetzen. Bitte manuell eingeben.");
+    }
+    setTranslating(false);
+  }
 
   async function addWord() {
     if (!de.trim()||!ru.trim()) return;
@@ -414,8 +455,13 @@ function WordsTab({ session }) {
       <h3>+ Eigenes Wort hinzufügen</h3>
       <div className="form-row">
         <input className="in-sm" placeholder="der/die/das" value={article} onChange={e=>setArticle(e.target.value)}/>
-        <input placeholder="Deutsches Wort" value={de} onChange={e=>setDe(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addWord()}/>
-        <input placeholder="Muttersprache" value={ru} onChange={e=>setRu(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addWord()}/>
+        <input placeholder="Deutsches Wort" value={de} onChange={e=>setDe(e.target.value)}/>
+        <button className="btn-add" onClick={autoTranslate} disabled={!de.trim()||translating} style={{background:"var(--accent)",flexShrink:0}}>
+          {translating?"⏳":"🤖"}
+        </button>
+      </div>
+      <div className="form-row">
+        <input placeholder="Übersetzung (Muttersprache)" value={ru} onChange={e=>setRu(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addWord()}/>
       </div>
       <div className="form-row">
         <input placeholder="Beispielsatz (optional)" value={example} onChange={e=>setExample(e.target.value)}/>
