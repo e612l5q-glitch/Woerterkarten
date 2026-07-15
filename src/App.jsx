@@ -393,33 +393,12 @@ function WordsTab({ session }) {
     setTranslating(true);
     const langName = LANGUAGES.find(l=>l.code===session.lang)?.label?.split(" ")[0] || "Russisch";
     try {
-      const apiKey = import.meta.env.VITE_ANTHROPIC_KEY;
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/translate", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true"
-        },
-        body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 300,
-          messages: [{
-            role: "user",
-            content: `Du bist ein Wörterbuch-Assistent für Deutschlerner.
-Für das deutsche Wort "${article ? article + " " : ""}${de.trim()}" gib mir:
-1. Eine kurze Übersetzung ins ${langName} (1-3 Wörter)
-2. Einen einfachen deutschen Beispielsatz (A2-B1 Niveau)
-
-Antworte NUR im JSON-Format ohne Markdown:
-{"translation": "...", "example": "..."}`
-          }]
-        })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ word: de.trim(), article: article.trim(), lang: session.lang })
       });
-      const data = await res.json();
-      const text = data.content[0].text.trim();
-      const parsed = JSON.parse(text);
+      const parsed = await res.json();
       if (parsed.translation) setRu(parsed.translation);
       if (parsed.example) setExample(parsed.example);
     } catch(e) {
