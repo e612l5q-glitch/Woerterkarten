@@ -23,6 +23,7 @@ export default async function handler(req, res) {
   log("ANTHROPIC_KEY present:", hasKey, "| length:", (process.env.ANTHROPIC_KEY || "").length);
   if (!hasKey) {
     err("ANTHROPIC_KEY is missing");
+    log(process.env.ANTHROPIC_KEY);
   }
 
   const langNames = {
