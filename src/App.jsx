@@ -1,28 +1,66 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc } from "firebase/firestore";
+import {
+  getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, serverTimestamp,
+} from "firebase/firestore";
+import {
+  getAuth, onAuthStateChanged, signOut, setPersistence, browserLocalPersistence,
+  createUserWithEmailAndPassword, signInWithEmailAndPassword, getIdTokenResult,
+} from "firebase/auth";
 
+const env = import.meta.env;
 const firebaseConfig = {
-  apiKey: "AIzaSyAGqf4FgvRkYs3a7nWtGufV1OszEky8LXc",
-  authDomain: "woerterkarten.firebaseapp.com",
-  projectId: "woerterkarten",
-  storageBucket: "woerterkarten.firebasestorage.app",
-  messagingSenderId: "734444392049",
-  appId: "1:734444392049:web:60f190035db2ce2fb095d0"
+  apiKey: env.VITE_FIREBASE_API_KEY,
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: env.VITE_FIREBASE_APP_ID,
 };
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const auth = getAuth(app);
+setPersistence(auth, browserLocalPersistence).catch(() => {});
 
-const CLOUDINARY_CLOUD = "pxc5e62k";
-const CLOUDINARY_PRESET = "Woerterkarten";
+const LIMIT = { username: 32, password: 8, de: 100, ru: 200, example: 300, folder: 60 };
+const ARTICLES = ["", "der", "die", "das", "ein", "eine"];
+const clip = (s, n) => String(s ?? "").slice(0, n);
+function cleanArticle(a) { a = String(a || "").trim().toLowerCase(); return ARTICLES.includes(a) ? a : ""; }
+function validImageUrl(u) { return u == null || /^https:\/\/res\.cloudinary\.com\/[^\s]+$/.test(u); }
+
+function cldImg(u, w = 400) {
+  if (!u || !u.includes("/image/upload/") || /\/image\/upload\/[^/]*(?:f_auto|q_auto|w_\d)/.test(u)) return u;
+  return u.replace("/image/upload/", `/image/upload/f_auto,q_auto,c_limit,w_${w}/`);
+}
+
+function b32(str) {
+  const bytes = new TextEncoder().encode(str);
+  const A = "abcdefghijklmnopqrstuvwxyz234567";
+  let bits = 0, val = 0, out = "";
+  for (const byte of bytes) { val = (val << 8) | byte; bits += 8; while (bits >= 5) { out += A[(val >>> (bits - 5)) & 31]; bits -= 5; } }
+  if (bits > 0) out += A[(val << (5 - bits)) & 31];
+  return out;
+}
+const emailForUsername = (u) => `u-${b32(u.trim().toLowerCase())}@users.woerterkarten.app`;
+
+async function idToken() { return auth.currentUser ? auth.currentUser.getIdToken() : null; }
 
 async function uploadImage(file) {
+  if (!file.type.startsWith("image/")) throw new Error("Nur Bilder erlaubt.");
+  if (file.size > 5 * 1024 * 1024) throw new Error("Bild zu groß (max 5 MB).");
+  const token = await idToken();
+  const sigRes = await fetch("/api/sign-cloudinary", { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+  if (!sigRes.ok) throw new Error("Signatur fehlgeschlagen.");
+  const { signature, timestamp, apiKey, cloudName, folder } = await sigRes.json();
   const fd = new FormData();
   fd.append("file", file);
-  fd.append("upload_preset", CLOUDINARY_PRESET);
-  const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`, { method:"POST", body:fd });
+  fd.append("api_key", apiKey);
+  fd.append("timestamp", timestamp);
+  fd.append("signature", signature);
+  if (folder) fd.append("folder", folder);
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, { method: "POST", body: fd });
   const data = await res.json();
-  if (!data.secure_url) throw new Error("Upload failed");
+  if (!data.secure_url) throw new Error("Upload fehlgeschlagen");
   return data.secure_url;
 }
 
@@ -30,25 +68,23 @@ async function dbGet(path) {
   try { const snap = await getDoc(doc(db, ...path.split("/"))); return snap.exists() ? snap.data() : null; } catch { return null; }
 }
 async function dbSet(path, data) {
-  try { await setDoc(doc(db, ...path.split("/")), data, { merge: true }); } catch(e) { console.error(e); }
+  await setDoc(doc(db, ...path.split("/")), data, { merge: true });
 }
 async function dbGetAll(col) {
-  try { const snap = await getDocs(collection(db, col)); return snap.docs.map(d=>({id:d.id,...d.data()})); } catch { return []; }
+  try { const snap = await getDocs(collection(db, col)); return snap.docs.map((d) => ({ id: d.id, ...d.data() })); } catch { return []; }
 }
 
-function hashPass(p) { let h=0; for(let i=0;i<p.length;i++){h=((h<<5)-h)+p.charCodeAt(i);h|=0;} return h.toString(36); }
-const TEACHER_CODE = "lehrer2024";
-const INTERVALS = [0,1,3,7,14,30];
-function nextReview(level,knew) { const l=knew?Math.min(level+1,INTERVALS.length-1):0; return {level:l,due:Date.now()+INTERVALS[l]*86400000}; }
-function isDue(p) { return !p?.due||Date.now()>=p.due; }
-const lvlEmoji = (l) => ["🌱","🌿","🌲","⭐","🏆","💎"][l??0]||"🌱";
+const INTERVALS = [0, 1, 3, 7, 14, 30];
+function nextReview(level, knew) { const l = knew ? Math.min(level + 1, INTERVALS.length - 1) : 0; return { level: l, due: Date.now() + INTERVALS[l] * 86400000 }; }
+function isDue(p) { return !p?.due || Date.now() >= p.due; }
+const lvlEmoji = (l) => ["🌱", "🌿", "🌲", "⭐", "🏆", "💎"][l ?? 0] || "🌱";
 
 const LANGUAGES = [
-  {code:"RU",label:"Русский 🇷🇺"},{code:"UK",label:"Українська 🇺🇦"},{code:"TR",label:"Türkçe 🇹🇷"},
-  {code:"AR",label:"العربية 🇸🇦"},{code:"PL",label:"Polski 🇵🇱"},{code:"RO",label:"Română 🇷🇴"},
-  {code:"FA",label:"فارسی 🇮🇷"},{code:"VI",label:"Tiếng Việt 🇻🇳"},{code:"ZH",label:"中文 🇨🇳"},
-  {code:"ES",label:"Español 🇪🇸"},{code:"FR",label:"Français 🇫🇷"},{code:"EN",label:"English 🇬🇧"},
-  {code:"IT",label:"Italiano 🇮🇹"},{code:"PT",label:"Português 🇵🇹"},{code:"JA",label:"日本語 🇯🇵"},
+  { code: "RU", label: "Русский 🇷🇺" }, { code: "UK", label: "Українська 🇺🇦" }, { code: "TR", label: "Türkçe 🇹🇷" },
+  { code: "AR", label: "العربية 🇸🇦" }, { code: "PL", label: "Polski 🇵🇱" }, { code: "RO", label: "Română 🇷🇴" },
+  { code: "FA", label: "فارسی 🇮🇷" }, { code: "VI", label: "Tiếng Việt 🇻🇳" }, { code: "ZH", label: "中文 🇨🇳" },
+  { code: "ES", label: "Español 🇪🇸" }, { code: "FR", label: "Français 🇫🇷" }, { code: "EN", label: "English 🇬🇧" },
+  { code: "IT", label: "Italiano 🇮🇹" }, { code: "PT", label: "Português 🇵🇹" }, { code: "JA", label: "日本語 🇯🇵" },
 ];
 
 const css = `
@@ -146,49 +182,57 @@ const css = `
 `;
 
 export default function App() {
-  const [session, setSession] = useState(null);
+  const [session, setSession] = useState(null);   
   const [tab, setTab] = useState("learn");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const s = localStorage.getItem("dw_session");
-    if (s) setSession(JSON.parse(s));
-    setLoading(false);
+    return onAuthStateChanged(auth, async (user) => {
+      if (!user) { setSession(null); setLoading(false); return; }
+      const [profile, tokenRes] = await Promise.all([
+        dbGet(`users/${user.uid}`),
+        getIdTokenResult(user),
+      ]);
+      setSession({
+        uid: user.uid,
+        username: profile?.username || "Nutzer",
+        lang: profile?.lang || "RU",
+        isTeacher: tokenRes.claims.teacher === true,
+      });
+      setTab("learn");
+      setLoading(false);
+    });
   }, []);
 
-  function login(username, isTeacher, lang) {
-    const s = { username, isTeacher, lang };
-    localStorage.setItem("dw_session", JSON.stringify(s));
-    setSession(s); setTab("learn");
-  }
-  function logout() { localStorage.removeItem("dw_session"); setSession(null); }
+  function logout() { signOut(auth); }
 
-  if (loading) return <><style>{css}</style><div className="app"><div className="loading"><div className="spinner"/><br/>Lädt…</div></div></>;
-  if (!session) return <><style>{css}</style><div className="app"><AuthScreen onLogin={login}/></div></>;
+  if (loading) return <><style>{css}</style><div className="app"><div className="loading"><div className="spinner" /><br />Lädt…</div></div></>;
+  if (!session) return <><style>{css}</style><div className="app"><AuthScreen /></div></>;
 
   return (<><style>{css}</style><div className="app">
     <header className="header">
       <div className="brand"><h1>Wörterkarten</h1><span>Deutsch lernen</span></div>
       <button className="user-pill" onClick={logout}>
-        <span className="dot"/>
+        <span className="dot" />
         {session.username}
         {session.isTeacher && <span className="teacher-badge">Lehrerin</span>}
       </button>
     </header>
     <nav className="nav">
-      <button className={`nav-tab${tab==="learn"?" active":""}`} onClick={()=>setTab("learn")}>🃏 Lernen</button>
-      <button className={`nav-tab${tab==="words"?" active":""}`} onClick={()=>setTab("words")}>📋 Wörter</button>
-      <button className={`nav-tab${tab==="folders"?" active":""}`} onClick={()=>setTab("folders")}>📁 Ordner</button>
-      {session.isTeacher && <button className={`nav-tab${tab==="manage"?" active":""}`} onClick={()=>setTab("manage")}>✏️ Verwalten</button>}
+      <button className={`nav-tab${tab === "learn" ? " active" : ""}`} onClick={() => setTab("learn")}>🃏 Lernen</button>
+      <button className={`nav-tab${tab === "words" ? " active" : ""}`} onClick={() => setTab("words")}>📋 Wörter</button>
+      <button className={`nav-tab${tab === "folders" ? " active" : ""}`} onClick={() => setTab("folders")}>📁 Ordner</button>
+      {session.isTeacher && <button className={`nav-tab${tab === "manage" ? " active" : ""}`} onClick={() => setTab("manage")}>✏️ Verwalten</button>}
     </nav>
-    {tab==="learn" && <LearnTab session={session}/>}
-    {tab==="words" && <WordsTab session={session}/>}
-    {tab==="folders" && <FoldersTab session={session}/>}
-    {tab==="manage" && session.isTeacher && <ManageTab/>}
+    {tab === "learn" && <LearnTab session={session} />}
+    {tab === "words" && <WordsTab session={session} />}
+    {tab === "folders" && <FoldersTab session={session} />}
+    {/* Defense in depth: even if this renders, firestore.rules blocks non-teachers. */}
+    {tab === "manage" && session.isTeacher && <ManageTab />}
   </div></>);
 }
 
-function AuthScreen({ onLogin }) {
+function AuthScreen() {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -200,47 +244,58 @@ function AuthScreen({ onLogin }) {
   async function handleSubmit() {
     setErr(""); setBusy(true);
     const u = username.trim();
-    if (!u||!password) { setErr("Fehlende Angaben."); setBusy(false); return; }
-    if (mode==="login") {
-      const acc = await dbGet(`accounts/${u}`);
-      if (!acc) { setErr("Benutzer nicht gefunden."); setBusy(false); return; }
-      if (acc.passwordHash!==hashPass(password)) { setErr("Falsches Passwort."); setBusy(false); return; }
-      onLogin(u, acc.isTeacher, acc.lang||"RU");
-    } else {
-      const existing = await dbGet(`accounts/${u}`);
-      if (existing) { setErr("Benutzername vergeben."); setBusy(false); return; }
-      if (password.length<4) { setErr("Passwort mindestens 4 Zeichen."); setBusy(false); return; }
-      const isTeacher = teacherCode===TEACHER_CODE;
-      if (teacherCode&&!isTeacher) { setErr("Falscher Lehrerinnen-Code."); setBusy(false); return; }
-      await dbSet(`accounts/${u}`, { passwordHash:hashPass(password), isTeacher, lang });
-      onLogin(u, isTeacher, lang);
+    if (!u || !password) { setErr("Fehlende Angaben."); setBusy(false); return; }
+    if (u.length > LIMIT.username) { setErr("Benutzername zu lang."); setBusy(false); return; }
+    const email = emailForUsername(u);
+    try {
+      if (mode === "login") {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        if (password.length < LIMIT.password) { setErr(`Passwort mindestens ${LIMIT.password} Zeichen.`); setBusy(false); return; }
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await dbSet(`users/${cred.user.uid}`, { username: u, lang, createdAt: serverTimestamp() });
+
+        if (teacherCode) {
+          try {
+            const token = await cred.user.getIdToken();
+            await fetch("/api/claim-teacher", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ code: teacherCode }),
+            });
+            await cred.user.getIdToken(true); 
+          } catch { /* wrong code is not fatal to signup — stay a normal user */ }
+        }
+      }
+    } catch {
+      setErr(mode === "login" ? "Login fehlgeschlagen." : "Registrierung fehlgeschlagen (Name evtl. vergeben).");
     }
     setBusy(false);
   }
 
   return (
     <div className="auth-wrap">
-      <h2>{mode==="login"?"Willkommen zurück 👋":"Konto erstellen 🌱"}</h2>
-      <p>{mode==="login"?"Melde dich mit deinem Konto an.":"Wähle einen Namen und ein Passwort."}</p>
+      <h2>{mode === "login" ? "Willkommen zurück 👋" : "Konto erstellen 🌱"}</h2>
+      <p>{mode === "login" ? "Melde dich mit deinem Konto an." : "Wähle einen Namen und ein Passwort."}</p>
       <div className="auth-box">
         <label>Benutzername</label>
-        <input placeholder="z. B. Maria" value={username} onChange={e=>setUsername(e.target.value)} autoFocus onKeyDown={e=>e.key==="Enter"&&handleSubmit()}/>
+        <input placeholder="z. B. Maria" value={username} maxLength={LIMIT.username} onChange={(e) => setUsername(e.target.value)} autoFocus onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
         <label>Passwort</label>
-        <input type="password" placeholder="••••••" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleSubmit()}/>
-        {mode==="register" && <>
+        <input type="password" placeholder="••••••" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
+        {mode === "register" && <>
           <label>Deine Muttersprache</label>
-          <select value={lang} onChange={e=>setLang(e.target.value)}>
-            {LANGUAGES.map(l=><option key={l.code} value={l.code}>{l.label}</option>)}
+          <select value={lang} onChange={(e) => setLang(e.target.value)}>
+            {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
           </select>
           <label>Lehrerinnen-Code (optional)</label>
-          <input placeholder="Nur für die Lehrerin" value={teacherCode} onChange={e=>setTeacherCode(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handleSubmit()}/>
+          <input placeholder="Nur für die Lehrerin" value={teacherCode} onChange={(e) => setTeacherCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
         </>}
         {err && <p className="err">{err}</p>}
-        <button className="btn-main" style={{marginTop:6}} onClick={handleSubmit} disabled={!username.trim()||!password||busy}>
-          {busy?"Lädt…":mode==="login"?"Einloggen":"Registrieren"}
+        <button className="btn-main" style={{ marginTop: 6 }} onClick={handleSubmit} disabled={!username.trim() || !password || busy}>
+          {busy ? "Lädt…" : mode === "login" ? "Einloggen" : "Registrieren"}
         </button>
-        <button className="auth-switch" onClick={()=>{setMode(m=>m==="login"?"register":"login");setErr("");}}>
-          {mode==="login"?"Noch kein Konto? Registrieren →":"← Zurück zum Login"}
+        <button className="auth-switch" onClick={() => { setMode((m) => (m === "login" ? "register" : "login")); setErr(""); }}>
+          {mode === "login" ? "Noch kein Konto? Registrieren →" : "← Zurück zum Login"}
         </button>
       </div>
     </div>
@@ -249,10 +304,11 @@ function AuthScreen({ onLogin }) {
 
 async function loadGlobalWords() { return await dbGetAll("global_words"); }
 async function loadGlobalFolders() { return await dbGetAll("global_folders"); }
-async function loadUserWords(username) { return await dbGetAll(`users/${username}/words`); }
-async function loadUserFolders(username) { return await dbGetAll(`users/${username}/folders`); }
-async function loadProgress(username) { const d=await dbGet(`users/${username}/meta/progress`); return d?.data||{}; }
-async function saveProgress(username,progress) { await dbSet(`users/${username}/meta/progress`,{data:progress}); }
+async function loadUserWords(uid) { return await dbGetAll(`users/${uid}/words`); }
+async function loadUserFolders(uid) { return await dbGetAll(`users/${uid}/folders`); }
+async function loadLangTranslations(lang) { return await dbGetAll(`global_translations/${lang}/words`); }
+async function loadProgress(uid) { const d = await dbGet(`users/${uid}/meta/progress`); return d?.data || {}; }
+async function saveProgress(uid, progress) { await dbSet(`users/${uid}/meta/progress`, { data: progress }); }
 
 function ImageUpload({ value, onChange, small }) {
   const [uploading, setUploading] = useState(false);
@@ -260,18 +316,16 @@ function ImageUpload({ value, onChange, small }) {
     const file = e.target.files[0];
     if (!file) return;
     setUploading(true);
-    try {
-      const url = await uploadImage(file);
-      onChange(url);
-    } catch { alert("Upload fehlgeschlagen. Bitte erneut versuchen."); }
+    try { onChange(await uploadImage(file)); }
+    catch (err) { alert(err.message || "Upload fehlgeschlagen."); }
     setUploading(false);
   }
   return (
-    <div className="img-upload-area" style={small?{width:80,padding:8}:{}}>
-      <input type="file" accept="image/*" onChange={handleFile}/>
+    <div className="img-upload-area" style={small ? { width: 80, padding: 8 } : {}}>
+      <input type="file" accept="image/*" onChange={handleFile} />
       {value
-        ? <img src={value} className="img-preview" style={small?{width:44,height:44}:{}}/>
-        : <div className="img-upload-label">{uploading?"⏳":"📷"}<br/>{uploading?"Lädt…":small?"Bild":"Bild hochladen"}</div>}
+        ? <img src={value} className="img-preview" style={small ? { width: 44, height: 44 } : {}} alt="" />
+        : <div className="img-upload-label">{uploading ? "⏳" : "📷"}<br />{uploading ? "Lädt…" : small ? "Bild" : "Bild hochladen"}</div>}
     </div>
   );
 }
@@ -279,204 +333,243 @@ function ImageUpload({ value, onChange, small }) {
 function LearnTab({ session }) {
   const [revealed, setRevealed] = useState(false);
   const [idx, setIdx] = useState(0);
-  const [direction, setDirection] = useState(()=>localStorage.getItem("dw_dir")||"de2ru");
+  const [direction, setDirection] = useState(() => localStorage.getItem("dw_dir") || "de2ru");
   const [filterFolder, setFilterFolder] = useState("all");
   const [allWords, setAllWords] = useState([]);
   const [folders, setFolders] = useState([]);
   const [progress, setProgress] = useState({});
   const [loading, setLoading] = useState(true);
+  const [translatedIds, setTranslatedIds] = useState(() => new Set());
 
-  useEffect(()=>{
-    (async()=>{
-      const [gw,uw,gf,uf,prog]=await Promise.all([loadGlobalWords(),loadUserWords(session.username),loadGlobalFolders(),loadUserFolders(session.username),loadProgress(session.username)]);
-      setAllWords([...gw,...uw]);
-      setFolders([...gf.map(f=>({...f,source:"global"})),...uf.map(f=>({...f,source:"personal"}))]);
+  useEffect(() => {
+    (async () => {
+      const [gw, uw, gf, uf, prog, ut] = await Promise.all([loadGlobalWords(), loadUserWords(session.uid), loadGlobalFolders(), loadUserFolders(session.uid), loadProgress(session.uid), loadLangTranslations(session.lang)]);
+
+      const tmap = {};
+      ut.forEach((t) => { tmap[t.id] = t; });
+      const mergedGW = gw.map((w) => (tmap[w.id] ? { ...w, ru: tmap[w.id].ru, example: tmap[w.id].example || w.example } : w));
+      setAllWords([...mergedGW, ...uw]);
+      setTranslatedIds(new Set(Object.keys(tmap)));
+      setFolders([...gf.map((f) => ({ ...f, source: "global" })), ...uf.map((f) => ({ ...f, source: "personal" }))]);
       setProgress(prog); setLoading(false);
     })();
-  },[]);
+  }, []);
 
-  const setDir=(d)=>{setDirection(d);localStorage.setItem("dw_dir",d);setRevealed(false);setIdx(0);};
-  const filteredWords=filterFolder==="all"?allWords:allWords.filter(w=>w.folderId===filterFolder);
-  const dueCards=filteredWords.filter(w=>isDue(progress[w.id]));
-  const total=filteredWords.length;
-  const learned=filteredWords.filter(w=>(progress[w.id]?.level||0)>=3).length;
-  const card=dueCards[idx%Math.max(dueCards.length,1)]||null;
+  const setDir = (d) => { setDirection(d); localStorage.setItem("dw_dir", d); setRevealed(false); setIdx(0); };
+  const filteredWords = filterFolder === "all" ? allWords : allWords.filter((w) => w.folderId === filterFolder);
+  const dueCards = filteredWords.filter((w) => isDue(progress[w.id]));
+  const total = filteredWords.length;
+  const learned = filteredWords.filter((w) => (progress[w.id]?.level || 0) >= 3).length;
+  const card = dueCards[idx % Math.max(dueCards.length, 1)] || null;
+
+  async function ensureTranslation(c) {
+    if (!c || c.source !== "global" || translatedIds.has(c.id)) return;
+    setTranslatedIds((s) => new Set(s).add(c.id));
+    try {
+      const token = await idToken();
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ wordId: c.id, word: c.de, article: c.article, lang: session.lang }),
+      });
+      if (!res.ok) throw new Error("translate failed");
+      const parsed = await res.json();
+      if (parsed.translation) {
+        const trans = { ru: clip(parsed.translation, LIMIT.ru), example: clip(parsed.example || c.example || "", LIMIT.example) };
+        setAllWords((prev) => prev.map((w) => (w.id === c.id ? { ...w, ...trans } : w)));
+      }
+    } catch {
+      setTranslatedIds((s) => { const n = new Set(s); n.delete(c.id); return n; }); 
+    }
+  }
+
+  useEffect(() => { if (card) ensureTranslation(card); }, [card?.id]);
 
   async function answer(knew) {
     if (!card) return;
-    const p=progress[card.id]||{level:0};
-    const newProg={...progress,[card.id]:nextReview(p.level,knew)};
+    const p = progress[card.id] || { level: 0 };
+    const newProg = { ...progress, [card.id]: nextReview(p.level, knew) };
     setProgress(newProg);
-    await saveProgress(session.username,newProg);
+    await saveProgress(session.uid, newProg);
     setRevealed(false);
-    setIdx(i=>i>=dueCards.length-1?0:i+1);
+    setIdx((i) => (i >= dueCards.length - 1 ? 0 : i + 1));
   }
 
-  const langLabel = LANGUAGES.find(l=>l.code===session.lang)?.label?.split(" ")[0] || "Muttersprache";
-  const front=card?(direction==="de2ru"?{hint:"Deutsch → ?",article:card.article,word:card.de,isDE:true}:{hint:`${langLabel} → ?`,word:card.ru,isDE:false}):null;
-  const back=card?(direction==="de2ru"?{word:card.ru,isDE:false}:{article:card.article,word:card.de,isDE:true}):null;
-  const cardFolder=card?folders.find(f=>f.id===card.folderId):null;
+  const langLabel = LANGUAGES.find((l) => l.code === session.lang)?.label?.split(" ")[0] || "Muttersprache";
+  const front = card ? (direction === "de2ru" ? { hint: "Deutsch → ?", article: card.article, word: card.de, isDE: true } : { hint: `${langLabel} → ?`, word: card.ru || "…", isDE: false }) : null;
+  const back = card ? (direction === "de2ru" ? { word: card.ru, isDE: false } : { article: card.article, word: card.de, isDE: true }) : null;
+  const cardFolder = card ? folders.find((f) => f.id === card.folderId) : null;
 
-  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
+  if (loading) return <div className="loading"><div className="spinner" /><br />Lädt…</div>;
 
   return (<>
     <div className="stats-bar">
       <div className="stat"><div className="stat-n">{total}</div><div className="stat-l">Gesamt</div></div>
-      <div className="stat"><div className={`stat-n${dueCards.length>0?" due":""}`}>{dueCards.length}</div><div className="stat-l">Zu lernen</div></div>
+      <div className="stat"><div className={`stat-n${dueCards.length > 0 ? " due" : ""}`}>{dueCards.length}</div><div className="stat-l">Zu lernen</div></div>
       <div className="stat"><div className="stat-n ok">{learned}</div><div className="stat-l">Gelernt</div></div>
     </div>
-    {total>0&&<div className="prog-wrap">
-      <div className="prog-bar"><div className="prog-fill" style={{width:`${Math.round(learned/total*100)}%`}}/></div>
-      <div className="prog-text">{Math.round(learned/total*100)}% gemeistert</div>
+    {total > 0 && <div className="prog-wrap">
+      <div className="prog-bar"><div className="prog-fill" style={{ width: `${Math.round(learned / total * 100)}%` }} /></div>
+      <div className="prog-text">{Math.round(learned / total * 100)}% gemeistert</div>
     </div>}
-    {folders.length>0&&<div className="filter-bar">
-      <select value={filterFolder} onChange={e=>{setFilterFolder(e.target.value);setIdx(0);setRevealed(false);}}>
+    {folders.length > 0 && <div className="filter-bar">
+      <select value={filterFolder} onChange={(e) => { setFilterFolder(e.target.value); setIdx(0); setRevealed(false); }}>
         <option value="all">📂 Alle Ordner</option>
-        {folders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
+        {folders.map((f) => <option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
       </select>
     </div>}
-    {total>0&&<div className="dir-toggle">
-      <button className={`dir-btn${direction==="de2ru"?" active":""}`} onClick={()=>setDir("de2ru")}>Deutsch</button>
-      <span style={{color:"var(--sage-light)",padding:"0 2px"}}>⇄</span>
-      <button className={`dir-btn${direction==="ru2de"?" active":""}`} onClick={()=>setDir("ru2de")}>{langLabel}</button>
+    {total > 0 && <div className="dir-toggle">
+      <button className={`dir-btn${direction === "de2ru" ? " active" : ""}`} onClick={() => setDir("de2ru")}>Deutsch</button>
+      <span style={{ color: "var(--sage-light)", padding: "0 2px" }}>⇄</span>
+      <button className={`dir-btn${direction === "ru2de" ? " active" : ""}`} onClick={() => setDir("ru2de")}>{langLabel}</button>
     </div>}
-    {!card?(
+    {!card ? (
       <div className="empty">
-        <div className="emoji">{total===0?"📭":"🎉"}</div>
-        <h3>{total===0?"Noch keine Wörter":"Alle Karten gelernt!"}</h3>
-        <p style={{fontSize:14}}>{total===0?"Die Lehrerin fügt bald Wörter hinzu.":"Komm später wieder zurück."}</p>
+        <div className="emoji">{total === 0 ? "📭" : "🎉"}</div>
+        <h3>{total === 0 ? "Noch keine Wörter" : "Alle Karten gelernt!"}</h3>
+        <p style={{ fontSize: 14 }}>{total === 0 ? "Die Lehrerin fügt bald Wörter hinzu." : "Komm später wieder zurück."}</p>
       </div>
-    ):(<>
+    ) : (<>
       <div className="fc-wrap">
-        <div className="fc" onClick={()=>!revealed&&setRevealed(true)}>
-          {cardFolder&&<div className="fc-folder">{cardFolder.icon} {cardFolder.name}</div>}
+        <div className="fc" onClick={() => !revealed && setRevealed(true)}>
+          {cardFolder && <div className="fc-folder">{cardFolder.icon} {cardFolder.name}</div>}
           <div className="fc-lvl">{lvlEmoji(progress[card.id]?.level)}</div>
-          {card.imageUrl&&<img src={card.imageUrl} className="fc-img" alt=""/>}
+          {card.imageUrl && validImageUrl(card.imageUrl) && <img src={cldImg(card.imageUrl, 600)} className="fc-img" alt="" decoding="async" />}
           <div className="fc-hint">{front.hint}</div>
-          {front.isDE&&front.article&&<div className="fc-article">{front.article}</div>}
-          <div className="fc-word" style={front.isDE?{}:{fontFamily:"'Inter',sans-serif",fontSize:28}}>{front.word}</div>
-          {revealed?(<>
-            {back.isDE&&back.article&&<div className="fc-article" style={{marginTop:10}}>{back.article}</div>}
-            <div className={back.isDE?"fc-word":"fc-ru"} style={back.isDE?{marginTop:6,fontSize:28}:{}}>{back.word}</div>
-            {card.example&&<div className="fc-example">„{card.example}"</div>}
-          </>):<div className="fc-tap">Tippe, um {direction==="de2ru"?"die Übersetzung":"das deutsche Wort"} zu sehen</div>}
+          {front.isDE && front.article && <div className="fc-article">{front.article}</div>}
+          <div className="fc-word" style={front.isDE ? {} : { fontFamily: "'Inter',sans-serif", fontSize: 28 }}>{front.word}</div>
+          {revealed ? (<>
+            {back.isDE && back.article && <div className="fc-article" style={{ marginTop: 10 }}>{back.article}</div>}
+            <div className={back.isDE ? "fc-word" : "fc-ru"} style={back.isDE ? { marginTop: 6, fontSize: 28 } : {}}>{back.word || <span style={{ color: "#ccc", fontSize: 14 }}>⏳ Wird übersetzt…</span>}</div>
+            {card.example && <div className="fc-example">„{card.example}"</div>}
+          </>) : <div className="fc-tap">Tippe, um {direction === "de2ru" ? "die Übersetzung" : "das deutsche Wort"} zu sehen</div>}
         </div>
       </div>
-      {revealed&&<div className="ans-btns">
-        <button className="btn-forgot" onClick={()=>answer(false)}>😬 Nochmal</button>
-        <button className="btn-knew" onClick={()=>answer(true)}>✓ Wusste ich</button>
+      {revealed && <div className="ans-btns">
+        <button className="btn-forgot" onClick={() => answer(false)}>😬 Nochmal</button>
+        <button className="btn-knew" onClick={() => answer(true)}>✓ Wusste ich</button>
       </div>}
     </>)}
   </>);
 }
 
 function WordsTab({ session }) {
-  const [de,setDe]=useState("");const [article,setArticle]=useState("");
-  const [ru,setRu]=useState("");const [example,setExample]=useState("");
-  const [folderId,setFolderId]=useState("");const [imageUrl,setImageUrl]=useState("");
-  const [search,setSearch]=useState("");const [filterFolder,setFilterFolder]=useState("all");
-  const [allWords,setAllWords]=useState([]);const [folders,setFolders]=useState([]);
-  const [loading,setLoading]=useState(true);
-  const [translating,setTranslating]=useState(false);
+  const [de, setDe] = useState(""); const [article, setArticle] = useState("");
+  const [ru, setRu] = useState(""); const [example, setExample] = useState("");
+  const [folderId, setFolderId] = useState(""); const [imageUrl, setImageUrl] = useState("");
+  const [search, setSearch] = useState(""); const [filterFolder, setFilterFolder] = useState("all");
+  const [allWords, setAllWords] = useState([]); const [folders, setFolders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [translating, setTranslating] = useState(false);
 
-  useEffect(()=>{
-    (async()=>{
-      const [gw,uw,gf,uf]=await Promise.all([loadGlobalWords(),loadUserWords(session.username),loadGlobalFolders(),loadUserFolders(session.username)]);
-      setAllWords([...gw,...uw]);
-      setFolders([...gf.map(f=>({...f,source:"global"})),...uf.map(f=>({...f,source:"personal"}))]);
+  useEffect(() => {
+    (async () => {
+      const [gw, uw, gf, uf] = await Promise.all([loadGlobalWords(), loadUserWords(session.uid), loadGlobalFolders(), loadUserFolders(session.uid)]);
+      setAllWords([...gw, ...uw]);
+      setFolders([...gf.map((f) => ({ ...f, source: "global" })), ...uf.map((f) => ({ ...f, source: "personal" }))]);
       setLoading(false);
     })();
-  },[]);
+  }, []);
 
   async function autoTranslate() {
     if (!de.trim()) return;
     setTranslating(true);
-    const langName = LANGUAGES.find(l=>l.code===session.lang)?.label?.split(" ")[0] || "Russisch";
     try {
+      const token = await idToken();
       const res = await fetch("/api/translate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ word: de.trim(), article: article.trim(), lang: session.lang })
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ word: de.trim(), article: article.trim(), lang: session.lang }),
       });
+      if (!res.ok) throw new Error("translate failed");
       const parsed = await res.json();
-      if (parsed.translation) setRu(parsed.translation);
-      if (parsed.example) setExample(parsed.example);
-    } catch(e) {
+      if (parsed.translation) setRu(clip(parsed.translation, LIMIT.ru));
+      if (parsed.example) setExample(clip(parsed.example, LIMIT.example));
+    } catch {
       alert("Fehler beim Übersetzen. Bitte manuell eingeben.");
     }
     setTranslating(false);
   }
 
   async function addWord() {
-    if (!de.trim()||!ru.trim()) return;
-    const id=`p_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const w={de:de.trim(),article:article.trim(),ru:ru.trim(),example:example.trim(),folderId:folderId||null,imageUrl:imageUrl||null,addedBy:session.username,source:"personal"};
-    await dbSet(`users/${session.username}/words/${id}`,w);
-    setAllWords(prev=>[...prev,{...w,id}]);
-    setDe("");setArticle("");setRu("");setExample("");setFolderId("");setImageUrl("");
+    if (!de.trim() || !ru.trim()) return;
+    if (imageUrl && !validImageUrl(imageUrl)) { alert("Ungültige Bild-URL."); return; }
+    const id = `p_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const w = {
+      de: clip(de.trim(), LIMIT.de), article: cleanArticle(article), ru: clip(ru.trim(), LIMIT.ru),
+      example: clip(example.trim(), LIMIT.example), folderId: folderId || null, imageUrl: imageUrl || null,
+      addedBy: session.uid, source: "personal",
+    };
+    try {
+      await dbSet(`users/${session.uid}/words/${id}`, w);
+      setAllWords((prev) => [...prev, { ...w, id }]);
+      setDe(""); setArticle(""); setRu(""); setExample(""); setFolderId(""); setImageUrl("");
+    } catch { alert("Speichern fehlgeschlagen."); }
   }
 
   async function deleteWord(word) {
-    await deleteDoc(doc(db,`users/${session.username}/words/${word.id}`));
-    setAllWords(prev=>prev.filter(w=>w.id!==word.id));
+    try {
+      await deleteDoc(doc(db, `users/${session.uid}/words/${word.id}`));
+      setAllWords((prev) => prev.filter((w) => w.id !== word.id));
+    } catch { alert("Löschen fehlgeschlagen."); }
   }
 
-  const visible=allWords.filter(w=>{
-    const mf=filterFolder==="all"||w.folderId===filterFolder;
-    const ms=!search||w.de.toLowerCase().includes(search.toLowerCase())||w.ru.toLowerCase().includes(search.toLowerCase());
-    return mf&&ms;
+  const visible = allWords.filter((w) => {
+    const mf = filterFolder === "all" || w.folderId === filterFolder;
+    const ms = !search || w.de.toLowerCase().includes(search.toLowerCase()) || w.ru.toLowerCase().includes(search.toLowerCase());
+    return mf && ms;
   });
-  const myFolders=folders.filter(f=>f.source==="personal");
-  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
+  const myFolders = folders.filter((f) => f.source === "personal");
+  if (loading) return <div className="loading"><div className="spinner" /><br />Lädt…</div>;
 
   return (<>
     <div className="add-form">
       <h3>+ Eigenes Wort hinzufügen</h3>
       <div className="form-row">
-        <input className="in-sm" placeholder="der/die/das" value={article} onChange={e=>setArticle(e.target.value)}/>
-        <input placeholder="Deutsches Wort" value={de} onChange={e=>setDe(e.target.value)}/>
-        <button className="btn-add" onClick={autoTranslate} disabled={!de.trim()||translating} style={{background:"var(--accent)",flexShrink:0}}>
-          {translating?"⏳":"🤖"}
+        <input className="in-sm" placeholder="der/die/das" value={article} onChange={(e) => setArticle(e.target.value)} />
+        <input placeholder="Deutsches Wort" value={de} maxLength={LIMIT.de} onChange={(e) => setDe(e.target.value)} />
+        <button className="btn-add" onClick={autoTranslate} disabled={!de.trim() || translating} style={{ background: "var(--accent)", flexShrink: 0 }}>
+          {translating ? "⏳" : "🤖"}
         </button>
       </div>
       <div className="form-row">
-        <input placeholder="Übersetzung (Muttersprache)" value={ru} onChange={e=>setRu(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addWord()}/>
+        <input placeholder="Übersetzung (Muttersprache)" value={ru} maxLength={LIMIT.ru} onChange={(e) => setRu(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addWord()} />
       </div>
       <div className="form-row">
-        <input placeholder="Beispielsatz (optional)" value={example} onChange={e=>setExample(e.target.value)}/>
-        <select value={folderId} onChange={e=>setFolderId(e.target.value)} style={{flex:"none",width:160}}>
+        <input placeholder="Beispielsatz (optional)" value={example} maxLength={LIMIT.example} onChange={(e) => setExample(e.target.value)} />
+        <select value={folderId} onChange={(e) => setFolderId(e.target.value)} style={{ flex: "none", width: 160 }}>
           <option value="">📂 Kein Ordner</option>
-          {myFolders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
+          {myFolders.map((f) => <option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
         </select>
       </div>
-      <div className="form-row" style={{alignItems:"flex-end"}}>
-        <ImageUpload value={imageUrl} onChange={setImageUrl} small/>
-        <button className="btn-add" onClick={addWord} disabled={!de.trim()||!ru.trim()} style={{alignSelf:"flex-end"}}>+</button>
+      <div className="form-row" style={{ alignItems: "flex-end" }}>
+        <ImageUpload value={imageUrl} onChange={setImageUrl} small />
+        <button className="btn-add" onClick={addWord} disabled={!de.trim() || !ru.trim()} style={{ alignSelf: "flex-end" }}>+</button>
       </div>
     </div>
     <div className="filter-bar">
-      <input placeholder="🔍 Suchen…" value={search} onChange={e=>setSearch(e.target.value)}/>
-      <select value={filterFolder} onChange={e=>setFilterFolder(e.target.value)}>
+      <input placeholder="🔍 Suchen…" value={search} onChange={(e) => setSearch(e.target.value)} />
+      <select value={filterFolder} onChange={(e) => setFilterFolder(e.target.value)}>
         <option value="all">Alle Ordner</option>
-        {folders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
+        {folders.map((f) => <option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
       </select>
     </div>
     <div className="sec-label">Wörter ({visible.length})</div>
     <div className="word-list">
-      {visible.length===0&&<div className="empty" style={{padding:24}}><p>Keine Wörter gefunden.</p></div>}
-      {visible.map(w=>{
-        const folder=folders.find(f=>f.id===w.folderId);
-        const isOwn=w.source==="personal"&&w.addedBy===session.username;
+      {visible.length === 0 && <div className="empty" style={{ padding: 24 }}><p>Keine Wörter gefunden.</p></div>}
+      {visible.map((w) => {
+        const folder = folders.find((f) => f.id === w.folderId);
+        const isOwn = w.source === "personal";  
         return (
           <div className="word-item" key={w.id}>
-            {w.imageUrl?<img src={w.imageUrl} className="wi-img" alt=""/>:<div className="wi-img-placeholder">🔤</div>}
+            {w.imageUrl && validImageUrl(w.imageUrl) ? <img src={cldImg(w.imageUrl, 200)} className="wi-img" alt="" loading="lazy" decoding="async" /> : <div className="wi-img-placeholder">🔤</div>}
             <div className="wi-text">
-              <div className="wi-de">{w.article&&<span className="wi-article">{w.article}</span>}{w.de}</div>
-              <div className="wi-ru">{w.ru}{w.example&&<span style={{fontStyle:"italic",color:"#aaa"}}> — {w.example}</span>}</div>
+              <div className="wi-de">{w.article && <span className="wi-article">{w.article}</span>}{w.de}</div>
+              <div className="wi-ru">{w.ru}{w.example && <span style={{ fontStyle: "italic", color: "#aaa" }}> — {w.example}</span>}</div>
             </div>
-            {folder&&<span className="wi-folder">{folder.icon} {folder.name}</span>}
-            <span className={`wi-badge ${w.source==="global"?"badge-g":"badge-p"}`}>{w.source==="global"?"Kurs":"Ich"}</span>
-            {isOwn&&<button className="btn-del" onClick={()=>deleteWord(w)}>✕</button>}
+            {folder && <span className="wi-folder">{folder.icon} {folder.name}</span>}
+            <span className={`wi-badge ${w.source === "global" ? "badge-g" : "badge-p"}`}>{w.source === "global" ? "Kurs" : "Ich"}</span>
+            {isOwn && <button className="btn-del" onClick={() => deleteWord(w)}>✕</button>}
           </div>
         );
       })}
@@ -485,82 +578,83 @@ function WordsTab({ session }) {
 }
 
 function FoldersTab({ session }) {
-  const [name,setName]=useState("");const [icon,setIcon]=useState("📁");
-  const [selected,setSelected]=useState(null);
-  const [allWords,setAllWords]=useState([]);const [folders,setFolders]=useState([]);
-  const [loading,setLoading]=useState(true);
-  const icons=["📁","⭐","🔤","🏠","🍎","🚗","🌍","💼","📚","🎭","🌿","🔢"];
+  const [name, setName] = useState(""); const [icon, setIcon] = useState("📁");
+  const [selected, setSelected] = useState(null);
+  const [allWords, setAllWords] = useState([]); const [folders, setFolders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const icons = ["📁", "⭐", "🔤", "🏠", "🍎", "🚗", "🌍", "💼", "📚", "🎭", "🌿", "🔢"];
 
-  useEffect(()=>{
-    (async()=>{
-      const [gw,uw,gf,uf]=await Promise.all([loadGlobalWords(),loadUserWords(session.username),loadGlobalFolders(),loadUserFolders(session.username)]);
-      setAllWords([...gw,...uw]);
-      setFolders([...gf.map(f=>({...f,source:"global"})),...uf.map(f=>({...f,source:"personal"}))]);
+  useEffect(() => {
+    (async () => {
+      const [gw, uw, gf, uf] = await Promise.all([loadGlobalWords(), loadUserWords(session.uid), loadGlobalFolders(), loadUserFolders(session.uid)]);
+      setAllWords([...gw, ...uw]);
+      setFolders([...gf.map((f) => ({ ...f, source: "global" })), ...uf.map((f) => ({ ...f, source: "personal" }))]);
       setLoading(false);
     })();
-  },[]);
+  }, []);
 
   async function addFolder() {
     if (!name.trim()) return;
-    const id=`pf_${Date.now()}`;
-    const f={name:name.trim(),icon,source:"personal"};
-    await dbSet(`users/${session.username}/folders/${id}`,f);
-    setFolders(prev=>[...prev,{...f,id}]);
-    setName("");setIcon("📁");
+    const id = `pf_${Date.now()}`;
+    const f = { name: clip(name.trim(), LIMIT.folder), icon, source: "personal" };
+    try { await dbSet(`users/${session.uid}/folders/${id}`, f); setFolders((prev) => [...prev, { ...f, id }]); setName(""); setIcon("📁"); }
+    catch { alert("Speichern fehlgeschlagen."); }
   }
   async function deleteFolder(fid) {
-    await deleteDoc(doc(db,`users/${session.username}/folders/${fid}`));
-    setFolders(prev=>prev.filter(f=>f.id!==fid));
-    if (selected===fid) setSelected(null);
+    try {
+      await deleteDoc(doc(db, `users/${session.uid}/folders/${fid}`));
+      setFolders((prev) => prev.filter((f) => f.id !== fid));
+      if (selected === fid) setSelected(null);
+    } catch { alert("Löschen fehlgeschlagen."); }
   }
-  const wordsInFolder=(fid)=>allWords.filter(w=>w.folderId===fid);
-  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
+  const wordsInFolder = (fid) => allWords.filter((w) => w.folderId === fid);
+  if (loading) return <div className="loading"><div className="spinner" /><br />Lädt…</div>;
 
   return (<>
     <div className="add-form">
       <h3>+ Eigenen Ordner erstellen</h3>
       <div className="form-row">
-        <select value={icon} onChange={e=>setIcon(e.target.value)} style={{flex:"none",width:80}}>
-          {icons.map(ic=><option key={ic} value={ic}>{ic}</option>)}
+        <select value={icon} onChange={(e) => setIcon(e.target.value)} style={{ flex: "none", width: 80 }}>
+          {icons.map((ic) => <option key={ic} value={ic}>{ic}</option>)}
         </select>
-        <input placeholder="Ordnername, z. B. Lektion 3" value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addFolder()}/>
+        <input placeholder="Ordnername, z. B. Lektion 3" value={name} maxLength={LIMIT.folder} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addFolder()} />
         <button className="btn-add" onClick={addFolder} disabled={!name.trim()}>Erstellen</button>
       </div>
     </div>
     <div className="sec-label">Ordner</div>
     <div className="folder-grid">
-      <div className={`folder-card all${selected===null?" active":""}`} onClick={()=>setSelected(null)}>
+      <div className={`folder-card all${selected === null ? " active" : ""}`} onClick={() => setSelected(null)}>
         <div className="folder-icon">📂</div>
         <div className="folder-name">Alle Wörter</div>
         <div className="folder-count">{allWords.length} Wörter</div>
       </div>
-      {folders.map(f=>(
-        <div key={f.id} className={`folder-card${selected===f.id?" active":""}`} onClick={()=>setSelected(s=>s===f.id?null:f.id)}>
+      {folders.map((f) => (
+        <div key={f.id} className={`folder-card${selected === f.id ? " active" : ""}`} onClick={() => setSelected((s) => (s === f.id ? null : f.id))}>
           <div className="folder-icon">{f.icon}</div>
           <div className="folder-name">{f.name}</div>
-          <div className="folder-count">{wordsInFolder(f.id).length} Wörter · {f.source==="global"?"Kurs":"Mein"}</div>
+          <div className="folder-count">{wordsInFolder(f.id).length} Wörter · {f.source === "global" ? "Kurs" : "Mein"}</div>
         </div>
       ))}
     </div>
-    {selected&&(()=>{
-      const folder=folders.find(f=>f.id===selected);
-      const words=wordsInFolder(selected);
-      const isOwn=folder?.source==="personal";
+    {selected && (() => {
+      const folder = folders.find((f) => f.id === selected);
+      const words = wordsInFolder(selected);
+      const isOwn = folder?.source === "personal";
       return (<>
         <div className="folder-actions">
-          <span style={{fontWeight:600,fontSize:15}}>{folder?.icon} {folder?.name}</span>
-          {isOwn&&<button className="btn-sm danger" onClick={()=>deleteFolder(selected)}>Löschen</button>}
+          <span style={{ fontWeight: 600, fontSize: 15 }}>{folder?.icon} {folder?.name}</span>
+          {isOwn && <button className="btn-sm danger" onClick={() => deleteFolder(selected)}>Löschen</button>}
         </div>
-        <div className="word-list" style={{marginTop:10}}>
-          {words.length===0&&<div className="empty" style={{padding:20}}><p>Noch keine Wörter in diesem Ordner.</p></div>}
-          {words.map(w=>(
+        <div className="word-list" style={{ marginTop: 10 }}>
+          {words.length === 0 && <div className="empty" style={{ padding: 20 }}><p>Noch keine Wörter in diesem Ordner.</p></div>}
+          {words.map((w) => (
             <div className="word-item" key={w.id}>
-              {w.imageUrl?<img src={w.imageUrl} className="wi-img" alt=""/>:<div className="wi-img-placeholder">🔤</div>}
+              {w.imageUrl && validImageUrl(w.imageUrl) ? <img src={cldImg(w.imageUrl, 200)} className="wi-img" alt="" loading="lazy" decoding="async" /> : <div className="wi-img-placeholder">🔤</div>}
               <div className="wi-text">
-                <div className="wi-de">{w.article&&<span className="wi-article">{w.article}</span>}{w.de}</div>
+                <div className="wi-de">{w.article && <span className="wi-article">{w.article}</span>}{w.de}</div>
                 <div className="wi-ru">{w.ru}</div>
               </div>
-              <span className={`wi-badge ${w.source==="global"?"badge-g":"badge-p"}`}>{w.source==="global"?"Kurs":"Ich"}</span>
+              <span className={`wi-badge ${w.source === "global" ? "badge-g" : "badge-p"}`}>{w.source === "global" ? "Kurs" : "Ich"}</span>
             </div>
           ))}
         </div>
@@ -570,83 +664,82 @@ function FoldersTab({ session }) {
 }
 
 function ManageTab() {
-  const [de,setDe]=useState("");const [article,setArticle]=useState("");
-  const [ru,setRu]=useState("");const [example,setExample]=useState("");
-  const [folderId,setFolderId]=useState("");const [imageUrl,setImageUrl]=useState("");
-  const [bulk,setBulk]=useState("");const [msg,setMsg]=useState("");
-  const [folderName,setFolderName]=useState("");const [folderIcon,setFolderIcon]=useState("📁");
-  const [words,setWords]=useState([]);const [folders,setFolders]=useState([]);
-  const [loading,setLoading]=useState(true);
-  const icons=["📁","⭐","🔤","🏠","🍎","🚗","🌍","💼","📚","🎭","🌿","🔢"];
+  const [de, setDe] = useState(""); const [article, setArticle] = useState("");
+  const [ru, setRu] = useState(""); const [example, setExample] = useState("");
+  const [folderId, setFolderId] = useState(""); const [imageUrl, setImageUrl] = useState("");
+  const [bulk, setBulk] = useState(""); const [msg, setMsg] = useState("");
+  const [folderName, setFolderName] = useState(""); const [folderIcon, setFolderIcon] = useState("📁");
+  const [words, setWords] = useState([]); const [folders, setFolders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const icons = ["📁", "⭐", "🔤", "🏠", "🍎", "🚗", "🌍", "💼", "📚", "🎭", "🌿", "🔢"];
 
-  useEffect(()=>{
-    (async()=>{
-      const [gw,gf]=await Promise.all([loadGlobalWords(),loadGlobalFolders()]);
-      setWords(gw);setFolders(gf);setLoading(false);
+  useEffect(() => {
+    (async () => {
+      const [gw, gf] = await Promise.all([loadGlobalWords(), loadGlobalFolders()]);
+      setWords(gw); setFolders(gf); setLoading(false);
     })();
-  },[]);
+  }, []);
 
-  function flash(m){setMsg(m);setTimeout(()=>setMsg(""),2500);}
+  function flash(m) { setMsg(m); setTimeout(() => setMsg(""), 2500); }
 
   async function addWord() {
-    if (!de.trim()||!ru.trim()) return;
-    const id=`g_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const w={de:de.trim(),article:article.trim(),ru:ru.trim(),example:example.trim(),folderId:folderId||null,imageUrl:imageUrl||null,addedBy:"Lehrerin",source:"global"};
-    await dbSet(`global_words/${id}`,w);
-    setWords(prev=>[...prev,{...w,id}]);
-    setDe("");setArticle("");setRu("");setExample("");setImageUrl("");
-    flash("✓ Wort hinzugefügt");
+    if (!de.trim()) return; 
+    if (imageUrl && !validImageUrl(imageUrl)) { flash("⚠ Ungültige Bild-URL."); return; }
+    const id = `g_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const w = { de: clip(de.trim(), LIMIT.de), article: cleanArticle(article), ru: clip(ru.trim(), LIMIT.ru), example: clip(example.trim(), LIMIT.example), folderId: folderId || null, imageUrl: imageUrl || null, addedBy: "Lehrerin", source: "global" };
+    try { await dbSet(`global_words/${id}`, w); setWords((prev) => [...prev, { ...w, id }]); setDe(""); setArticle(""); setRu(""); setExample(""); setImageUrl(""); flash("✓ Wort hinzugefügt"); }
+    catch { flash("⚠ Keine Berechtigung."); }
   }
 
   async function bulkAdd() {
-    const lines=bulk.split("\n").map(l=>l.trim()).filter(Boolean);
-    const newW=[];
+    const lines = bulk.split("\n").map((l) => l.trim()).filter(Boolean);
+    const newW = [];
     for (const line of lines) {
-      const parts=line.split(/[–\-—|]/).map(s=>s.trim());
-      if (parts.length<2) continue;
-      let de_=parts[0],art_="",ru_=parts[1],ex_=parts[2]||"";
-      const m=de_.match(/^(der|die|das|ein|eine)\s+(.+)$/i);
-      if (m){art_=m[1];de_=m[2];}
-      newW.push({de:de_,article:art_,ru:ru_,example:ex_,folderId:folderId||null,imageUrl:null,addedBy:"Lehrerin",source:"global"});
+      const parts = line.split(/[–\-—|]/).map((s) => s.trim());
+      if (!parts[0]) continue;
+      let de_ = parts[0], art_ = "", ru_ = parts[1] || "", ex_ = parts[2] || "";
+      const m = de_.match(/^(der|die|das|ein|eine)\s+(.+)$/i);
+      if (m) { art_ = m[1]; de_ = m[2]; }
+      newW.push({ de: clip(de_, LIMIT.de), article: cleanArticle(art_), ru: clip(ru_, LIMIT.ru), example: clip(ex_, LIMIT.example), folderId: folderId || null, imageUrl: null, addedBy: "Lehrerin", source: "global" });
     }
-    if (!newW.length){flash("⚠ Format: Wort – Übersetzung");return;}
-    for (const w of newW) {
-      const id=`g_${Date.now()}_${Math.random().toString(36).slice(2)}_${newW.indexOf(w)}`;
-      await dbSet(`global_words/${id}`,w);
-      setWords(prev=>[...prev,{...w,id}]);
-    }
-    setBulk("");flash(`✓ ${newW.length} Wörter hinzugefügt`);
+    if (!newW.length) { flash("⚠ Format: Wort – Übersetzung"); return; }
+    try {
+      for (const w of newW) {
+        const id = `g_${Date.now()}_${Math.random().toString(36).slice(2)}_${newW.indexOf(w)}`;
+        await dbSet(`global_words/${id}`, w);
+        setWords((prev) => [...prev, { ...w, id }]);
+      }
+      setBulk(""); flash(`✓ ${newW.length} Wörter hinzugefügt`);
+    } catch { flash("⚠ Keine Berechtigung."); }
   }
 
   async function addFolder() {
     if (!folderName.trim()) return;
-    const id=`gf_${Date.now()}`;
-    const f={name:folderName.trim(),icon:folderIcon,source:"global"};
-    await dbSet(`global_folders/${id}`,f);
-    setFolders(prev=>[...prev,{...f,id}]);
-    setFolderName("");setFolderIcon("📁");
-    flash("✓ Ordner erstellt");
+    const id = `gf_${Date.now()}`;
+    const f = { name: clip(folderName.trim(), LIMIT.folder), icon: folderIcon, source: "global" };
+    try { await dbSet(`global_folders/${id}`, f); setFolders((prev) => [...prev, { ...f, id }]); setFolderName(""); setFolderIcon("📁"); flash("✓ Ordner erstellt"); }
+    catch { flash("⚠ Keine Berechtigung."); }
   }
 
-  async function deleteWord(id) { await deleteDoc(doc(db,`global_words/${id}`)); setWords(prev=>prev.filter(w=>w.id!==id)); }
-  async function deleteFolder(id) { await deleteDoc(doc(db,`global_folders/${id}`)); setFolders(prev=>prev.filter(f=>f.id!==id)); }
+  async function deleteWord(id) { try { await deleteDoc(doc(db, `global_words/${id}`)); setWords((prev) => prev.filter((w) => w.id !== id)); } catch { flash("⚠ Keine Berechtigung."); } }
+  async function deleteFolder(id) { try { await deleteDoc(doc(db, `global_folders/${id}`)); setFolders((prev) => prev.filter((f) => f.id !== id)); } catch { flash("⚠ Keine Berechtigung."); } }
 
-  if (loading) return <div className="loading"><div className="spinner"/><br/>Lädt…</div>;
+  if (loading) return <div className="loading"><div className="spinner" /><br />Lädt…</div>;
 
   return (<>
     <div className="add-form">
       <h3>📁 Kurs-Ordner erstellen</h3>
       <div className="form-row">
-        <select value={folderIcon} onChange={e=>setFolderIcon(e.target.value)} style={{flex:"none",width:80}}>
-          {icons.map(ic=><option key={ic} value={ic}>{ic}</option>)}
+        <select value={folderIcon} onChange={(e) => setFolderIcon(e.target.value)} style={{ flex: "none", width: 80 }}>
+          {icons.map((ic) => <option key={ic} value={ic}>{ic}</option>)}
         </select>
-        <input placeholder="Ordnername, z. B. Lektion 1" value={folderName} onChange={e=>setFolderName(e.target.value)}/>
+        <input placeholder="Ordnername, z. B. Lektion 1" value={folderName} maxLength={LIMIT.folder} onChange={(e) => setFolderName(e.target.value)} />
         <button className="btn-add" onClick={addFolder} disabled={!folderName.trim()}>Erstellen</button>
       </div>
-      {folders.length>0&&<div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:8}}>
-        {folders.map(f=><span key={f.id} style={{background:"var(--sage-pale)",color:"var(--sage)",padding:"3px 10px",borderRadius:99,fontSize:12,display:"flex",alignItems:"center",gap:6}}>
+      {folders.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+        {folders.map((f) => <span key={f.id} style={{ background: "var(--sage-pale)", color: "var(--sage)", padding: "3px 10px", borderRadius: 99, fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
           {f.icon} {f.name}
-          <button style={{background:"none",border:"none",cursor:"pointer",color:"#aaa",fontSize:12,padding:0}} onClick={()=>deleteFolder(f.id)}>✕</button>
+          <button style={{ background: "none", border: "none", cursor: "pointer", color: "#aaa", fontSize: 12, padding: 0 }} onClick={() => deleteFolder(f.id)}>✕</button>
         </span>)}
       </div>}
     </div>
@@ -654,55 +747,55 @@ function ManageTab() {
     <div className="add-form">
       <h3>Einzelnes Wort hinzufügen</h3>
       <div className="form-row">
-        <input className="in-sm" placeholder="der/die/das" value={article} onChange={e=>setArticle(e.target.value)}/>
-        <input placeholder="Deutsches Wort" value={de} onChange={e=>setDe(e.target.value)}/>
-        <input placeholder="Übersetzung" value={ru} onChange={e=>setRu(e.target.value)}/>
+        <input className="in-sm" placeholder="der/die/das" value={article} onChange={(e) => setArticle(e.target.value)} />
+        <input placeholder="Deutsches Wort" value={de} maxLength={LIMIT.de} onChange={(e) => setDe(e.target.value)} />
+        <input placeholder="Übersetzung (optional — Schüler übersetzen selbst)" value={ru} maxLength={LIMIT.ru} onChange={(e) => setRu(e.target.value)} />
       </div>
       <div className="form-row">
-        <input placeholder="Beispielsatz (optional)" value={example} onChange={e=>setExample(e.target.value)}/>
-        <select value={folderId} onChange={e=>setFolderId(e.target.value)} style={{flex:"none",width:160}}>
+        <input placeholder="Beispielsatz (optional)" value={example} maxLength={LIMIT.example} onChange={(e) => setExample(e.target.value)} />
+        <select value={folderId} onChange={(e) => setFolderId(e.target.value)} style={{ flex: "none", width: 160 }}>
           <option value="">📂 Kein Ordner</option>
-          {folders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
+          {folders.map((f) => <option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
         </select>
       </div>
-      <div className="form-row" style={{alignItems:"flex-end"}}>
-        <ImageUpload value={imageUrl} onChange={setImageUrl} small/>
-        <button className="btn-add" onClick={addWord} disabled={!de.trim()||!ru.trim()} style={{alignSelf:"flex-end"}}>+</button>
+      <div className="form-row" style={{ alignItems: "flex-end" }}>
+        <ImageUpload value={imageUrl} onChange={setImageUrl} small />
+        <button className="btn-add" onClick={addWord} disabled={!de.trim()} style={{ alignSelf: "flex-end" }}>+</button>
       </div>
-      {msg&&<p className="ok">{msg}</p>}
+      {msg && <p className="ok">{msg}</p>}
     </div>
 
     <div className="add-form">
       <h3>Mehrere Wörter auf einmal</h3>
-      <p style={{fontSize:12,color:"var(--ink-soft)",marginBottom:10}}>Format: <code>der Hund – собака</code> oder <code>arbeiten – работать – Ich arbeite gern.</code></p>
-      <div className="form-row" style={{marginBottom:10}}>
-        <select value={folderId} onChange={e=>setFolderId(e.target.value)}>
+      <p style={{ fontSize: 12, color: "var(--ink-soft)", marginBottom: 10 }}>Format: <code>der Hund – собака</code> oder <code>arbeiten – работать – Ich arbeite gern.</code></p>
+      <div className="form-row" style={{ marginBottom: 10 }}>
+        <select value={folderId} onChange={(e) => setFolderId(e.target.value)}>
           <option value="">📂 Kein Ordner</option>
-          {folders.map(f=><option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
+          {folders.map((f) => <option key={f.id} value={f.id}>{f.icon} {f.name}</option>)}
         </select>
       </div>
-      <textarea value={bulk} onChange={e=>setBulk(e.target.value)} rows={5}
+      <textarea value={bulk} onChange={(e) => setBulk(e.target.value)} rows={5}
         placeholder={"der Hund – собака\ndie Katze – кошка\narbeiten – работать"}
-        style={{width:"100%",padding:"9px 12px",border:"1.5px solid var(--ivory-dark)",borderRadius:8,fontSize:13,fontFamily:"inherit",resize:"vertical",background:"var(--ivory)",outline:"none",marginBottom:10}}/>
+        style={{ width: "100%", padding: "9px 12px", border: "1.5px solid var(--ivory-dark)", borderRadius: 8, fontSize: 13, fontFamily: "inherit", resize: "vertical", background: "var(--ivory)", outline: "none", marginBottom: 10 }} />
       <button className="btn-add" onClick={bulkAdd} disabled={!bulk.trim()}>Alle hinzufügen</button>
     </div>
 
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-      <div className="sec-label" style={{margin:0}}>Kurswörter ({words.length})</div>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+      <div className="sec-label" style={{ margin: 0 }}>Kurswörter ({words.length})</div>
     </div>
     <div className="word-list">
-      {words.length===0&&<div className="empty" style={{padding:20}}><p>Noch keine Kurswörter.</p></div>}
-      {words.map(w=>{
-        const folder=folders.find(f=>f.id===w.folderId);
+      {words.length === 0 && <div className="empty" style={{ padding: 20 }}><p>Noch keine Kurswörter.</p></div>}
+      {words.map((w) => {
+        const folder = folders.find((f) => f.id === w.folderId);
         return (
           <div className="word-item" key={w.id}>
-            {w.imageUrl?<img src={w.imageUrl} className="wi-img" alt=""/>:<div className="wi-img-placeholder">🔤</div>}
+            {w.imageUrl && validImageUrl(w.imageUrl) ? <img src={cldImg(w.imageUrl, 200)} className="wi-img" alt="" loading="lazy" decoding="async" /> : <div className="wi-img-placeholder">🔤</div>}
             <div className="wi-text">
-              <div className="wi-de">{w.article&&<span className="wi-article">{w.article}</span>}{w.de}</div>
-              <div className="wi-ru">{w.ru}{w.example&&<span style={{fontStyle:"italic",color:"#aaa"}}> — {w.example}</span>}</div>
+              <div className="wi-de">{w.article && <span className="wi-article">{w.article}</span>}{w.de}</div>
+              <div className="wi-ru">{w.ru}{w.example && <span style={{ fontStyle: "italic", color: "#aaa" }}> — {w.example}</span>}</div>
             </div>
-            {folder&&<span className="wi-folder">{folder.icon} {folder.name}</span>}
-            <button className="btn-del" onClick={()=>deleteWord(w.id)}>✕</button>
+            {folder && <span className="wi-folder">{folder.icon} {folder.name}</span>}
+            <button className="btn-del" onClick={() => deleteWord(w.id)}>✕</button>
           </div>
         );
       })}
